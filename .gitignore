@@ -2,3 +2,5 @@ __pycache__
 history/*.json
 .env
 user.config.toml
+characters/*
+!characters/default.toml
