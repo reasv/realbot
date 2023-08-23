@@ -1,3 +1,4 @@
 __pycache__
 history/*.json
 .env
+user.config.toml

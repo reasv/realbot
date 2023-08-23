@@ -1,0 +1,7 @@
+[whitelist]
+always = []
+mentions = []
+rand = []
+
+[prompt]
+character_card = 'default'

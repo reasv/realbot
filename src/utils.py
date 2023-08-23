@@ -1,8 +1,15 @@
 import tomllib
 
 def get_config():
-    with open('config.toml', 'rb') as f:
+    with open('default.config.toml', 'rb') as f:
         config = tomllib.load(f)
+    try:
+        with open('user.config.toml', 'rb') as f:
+            overrides = tomllib.load(f)
+    except:
+        overrides = {}
+
+    config.update(overrides)
     return config
 
 def get_character():
