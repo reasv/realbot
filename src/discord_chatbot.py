@@ -163,7 +163,8 @@ class Bot(discord.Client):
         self.pendingMessages[channelID] = queue
     
     async def process_messages(self):
-        for channelID in self.pendingMessages:
+        channelIDs = list(self.pendingMessages.keys())
+        for channelID in channelIDs:
             pending = self.pendingMessages.get(channelID, [])
             if len(pending) == 0:
                 continue
