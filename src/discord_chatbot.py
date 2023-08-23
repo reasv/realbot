@@ -38,15 +38,15 @@ class Bot(discord.Client):
 
         if len(message.content.strip()) == 0:
             return
-
-        if is_whitelisted(message.channel.id, 'rand'):
-            return await self.randomChat(message)
-
+        
+        if self.isMentioned(message) and is_whitelisted(message.channel.id, 'mentions'):
+            return await self.constantChat(message)
+        
         if is_whitelisted(message.channel.id, 'always'):
             return await self.constantChat(message)
 
-        if self.isMentioned(message) and is_whitelisted(message.channel.id, 'mentions'):
-            return await self.constantChat(message)
+        if is_whitelisted(message.channel.id, 'rand'):
+            return await self.randomChat(message)
 
     async def constantChat(self, message: Message):
         msg = await self.processMessage(message)
