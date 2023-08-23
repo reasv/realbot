@@ -5,6 +5,7 @@ This bot uses `discord-self` to control "real" user accounts as opposed to regul
 As such, the bot appears indistinguishable from a real user to others, aside from its potentially insane ramblings.
 
 ## Getting started
+This requires Python 3.11 in order to run.
 Rename `example.env` to `.env` and add your discord token inside it.
 
 Install dependencies
