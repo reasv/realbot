@@ -14,7 +14,7 @@ def run_inference(user_input, history, last_username: str):
 
     context = config['prompt']['prompt_format'].format(character=name, user=last_username, description=description)
     user_name = ""
-    bot_name = config["prompt"]["bot_name_format"].format(name=name)
+    bot_name = config["prompt"]["bot_name_format"].format(character=name, user=last_username)
     request = {
         'user_input': user_input,
         'max_new_tokens': 250,

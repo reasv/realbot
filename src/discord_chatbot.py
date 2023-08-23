@@ -10,7 +10,7 @@ import discord
 from discord import Guild, Message
 
 from .api_inference import chat_inference
-from .utils import get_config
+from .utils import get_config, dequote
 
 @dataclass
 class RandomChat:
@@ -172,7 +172,7 @@ class Bot(discord.Client):
             async with channel.typing():
                 loop = asyncio.get_running_loop()
                 response = await loop.run_in_executor(None, lambda: chat_inference(channelID, pending))
-            await channel.send(html.unescape(response))
+            await channel.send()
     
     async def inference_loop_task(self):
         await self.wait_until_ready()
@@ -185,3 +185,8 @@ def is_whitelisted(channelID: int, wtype: str = 'always'):
     whitelist: list[int] = config["whitelist"][wtype]
 
     return channelID in whitelist
+
+def clean_response(resp: str) -> str:
+    resp = html.unescape(resp)
+    resp = resp.strip()
+    return dequote(resp)
