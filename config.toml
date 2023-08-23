@@ -1,0 +1,27 @@
+[system]
+api_host = '192.168.1.16:5000'
+uri = 'http://{}/api/v1/chat'
+
+[whitelist]
+always = []
+mentions = []
+rand = [1143322712169787493,299274844690841600]
+
+[prompt]
+user_message_format = "{user}: {message}\n"
+bot_name_format = "{name}: "
+prompt_format = '''
+You are a Discord user chatting with other discord users. Your name is {name}. A description of your personality is below:
+{description}
+You are to roleplay as this character and continue the chat in accordance to it.
+'''
+character_card = 'default'
+
+[randomChat]
+engagement_chance = 10
+message_history_limit = 10
+min_chat_duration_seconds = 40
+max_chat_duration_seconds = 500
+min_downtime_minutes = 5
+max_downtime_minutes = 20
+respond_to_mentions = true
