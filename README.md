@@ -5,8 +5,9 @@ This bot uses `discord-self` to control "real" user accounts as opposed to regul
 As such, the bot appears indistinguishable from a real user to others, aside from its potentially insane ramblings.
 
 ## Getting started
-This requires Python 3.11 in order to run.
-This bot will connect to an instance of `https://github.com/oobabooga/text-generation-webui` for inference so ensure you have one running.
+Requires Python 3.11.
+
+This bot will connect to an instance of [text-generation-webui](https://github.com/oobabooga/text-generation-webui) for inference so ensure you have one running.
 
 Rename `example.env` to `.env` and add your discord token inside it.
 
@@ -46,4 +47,5 @@ The parameters for RandomChat can be configured through the appropriate configur
 ### Generation parameters
 Parameters used for inference such as temperature, rep penalty, mirostat, etc. can be set in `generation_params_override.json`.
 These will override the default configuration which you can see in `src/api_inference.py`
-Potentially this gives you full control over how the `text-generation-webui` API is called.
+
+Potentially this can give you you full control over how `text-generation-webui`'s API is used.
