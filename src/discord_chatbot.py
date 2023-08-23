@@ -172,7 +172,7 @@ class Bot(discord.Client):
             async with channel.typing():
                 loop = asyncio.get_running_loop()
                 response = await loop.run_in_executor(None, lambda: chat_inference(channelID, pending))
-            await channel.send()
+            await channel.send(clean_response(response))
     
     async def inference_loop_task(self):
         await self.wait_until_ready()
