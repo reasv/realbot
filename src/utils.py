@@ -1,4 +1,5 @@
 import tomllib
+from deepmerge import always_merger
 
 def get_config():
     with open('default.config.toml', 'rb') as f:
@@ -9,7 +10,7 @@ def get_config():
     except:
         overrides = {}
 
-    config.update(overrides)
+    config = always_merger.merge(config, overrides)
     return config
 
 def get_character():

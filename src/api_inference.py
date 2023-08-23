@@ -12,7 +12,7 @@ def run_inference(user_input, history, last_username: str):
     name = character['name']
     description = character['description'].replace("{{char}}", name).replace("{{user}}", last_username)
 
-    context = config['prompt']['prompt_format'].format(name=name, description=description)
+    context = config['prompt']['prompt_format'].format(character=name, user=last_username, description=description)
     user_name = ""
     bot_name = config["prompt"]["bot_name_format"].format(name=name)
     request = {
