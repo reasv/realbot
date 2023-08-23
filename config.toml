@@ -1,11 +1,11 @@
 [system]
-api_host = '192.168.1.16:5000'
+api_host = '127.0.0.1:5000'
 uri = 'http://{}/api/v1/chat'
 
 [whitelist]
 always = []
 mentions = []
-rand = [1143322712169787493,299274844690841600]
+rand = []
 
 [prompt]
 user_message_format = "{user}: {message}\n"
