@@ -35,9 +35,7 @@ def run_inference(user_input, history, last_username: str):
         'regenerate': False,
         '_continue': False,
 
-        # Generation params. If 'preset' is set to different than 'None', the values
-        # in presets/preset-name.yaml are used instead of the individual numbers.
-        'preset': 'None',
+        # Generation params
         'do_sample': True,
         'temperature': 0.95,
         'top_p': 0.1,
@@ -66,7 +64,7 @@ def run_inference(user_input, history, last_username: str):
         'truncation_length': 2048,
         'ban_eos_token': False,
         'skip_special_tokens': True,
-        'stopping_strings': ['/n']
+        'stopping_strings': ['\n']
     }
 
     with open('generation_params_override.json', 'r') as f:
