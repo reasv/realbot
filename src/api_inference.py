@@ -12,9 +12,11 @@ def run_inference(user_input, history, last_username: str):
     name = character['name']
     description = character['description'].replace("{{char}}", name).replace("{{user}}", last_username)
 
-    context = config['prompt']['prompt_format'].format(character=name, user=last_username, description=description)
+    context = config['prompt']['prompt_format'].format_map({'character': name, 'user': last_username, 'description': description})
+
     user_name = ""
-    bot_name = config["prompt"]["bot_name_format"].format(character=name, user=last_username)
+    bot_name = config["prompt"]["bot_name_format"].format_map({'character': name, 'user': last_username})
+
     request = {
         'user_input': user_input,
         'max_new_tokens': 250,
@@ -58,13 +60,13 @@ def run_inference(user_input, history, last_username: str):
         'mirostat_eta': 0.1,
         'guidance_scale': 1,
         'negative_prompt': '',
-        'stop_at_newline': True,
+        'stop_at_newline': False,
         'seed': -1,
         'add_bos_token': True,
         'truncation_length': 2048,
-        'ban_eos_token': False,
+        'ban_eos_token': True,
         'skip_special_tokens': True,
-        'stopping_strings': ['\n']
+        'stopping_strings': []
     }
 
     with open('generation_params_override.json', 'r') as f:
@@ -101,7 +103,8 @@ def chat_inference(channelID: str, messages: List[dict[str, str]]):
         message['user'] = message['user'].replace("{{char}}", name)
         message['message'] = message['message'].replace("{{char}}", name)
         print(message)
-        prompt += config["prompt"]["user_message_format"].format(user=message['user'], message=message['message'])
+        prompt += config["prompt"]["user_message_format"].format_map({'user': message['user'], 'message': message['message']})
+
         last_username = message['user']
 
     result = run_inference(prompt, history, last_username)
@@ -109,7 +112,7 @@ def chat_inference(channelID: str, messages: List[dict[str, str]]):
     
     with open(history_file, "w") as f:
         json.dump(history, f, indent=2)
-
+    print(result["message"])
     return result["message"]
 
 if __name__ == '__main__':
