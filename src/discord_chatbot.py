@@ -176,6 +176,8 @@ class Bot(discord.Client):
             
             if len(response) > 0:
                 await channel.send(clean_response(response))
+            else:
+                print("No response")
     
     async def inference_loop_task(self):
         await self.wait_until_ready()
