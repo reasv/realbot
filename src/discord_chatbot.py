@@ -120,6 +120,7 @@ class Bot(discord.Client):
             content = await self.cleanContent(message.content, message.guild)
         else:
             username = str(message.author)
+            content = await self.cleanContent(message.content, None)
 
         return {"user": username, "message": content}
 
@@ -142,15 +143,15 @@ class Bot(discord.Client):
         if user.name:
             return user.name
 
-    async def cleanContent(self, content: str, guild: Guild) -> str:
+    async def cleanContent(self, content: str, guild: Guild | None) -> str:
         mentions = re.compile('<@([\d]+)>')
         result = content
-        for match in mentions.finditer(content):
-            user_id = match.group(1)
-            username: str | None = await self.getName(int(user_id), guild)
-            if (username):
-                result = result.replace(match.group(0), f"@{username}")
-        
+        if guild:
+            for match in mentions.finditer(content):
+                user_id = match.group(1)
+                username: str | None = await self.getName(int(user_id), guild)
+                if (username):
+                    result = result.replace(match.group(0), f"@{username}")
         emoji = re.compile('<[\w]*:([\w]+):[\d]+>')
         for match in emoji.finditer(content):
             result = result.replace(match.group(0), f":{match.group(1)}:")
