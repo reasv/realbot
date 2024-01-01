@@ -1,6 +1,6 @@
 [system]
 api_host = '127.0.0.1:5000'
-uri = 'http://{}/api/v1/chat'
+uri = 'http://{}/v1/'
 
 [whitelist]
 always = []
