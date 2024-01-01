@@ -2,7 +2,7 @@ import json
 from typing import List
 import openai
 import asyncio
-from utils import get_config, get_character
+from src.utils import get_config, get_character
 
 async def run_inference(history, last_username: str):
     config = get_config()
@@ -24,11 +24,20 @@ async def run_inference(history, last_username: str):
         api_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     )
 
+    options = {
+        "max_tokens": 250,
+        "stop": ["\n\n", "</m>", "</s>"],
+        "temperature": 0.8,
+    }
+    overrides = {}
+    with open('generation_params_override.json', 'r') as f:
+        overrides = json.load(f)
+        options.update(overrides)
+    print(options)
     completion = await client.completions.create(
-        model="LoneStriker_zephyr-7b-alpha-8.0bpw-h6-exl2",
+        model="aaa",
         prompt=prompt,
-        max_tokens=250,
-        stop=["\n\n", "</m>", "</s>"],
+        **options
     )
 
     reply: str = completion.choices[0].text
@@ -89,13 +98,6 @@ async def run_inference(history, last_username: str):
     #     'stopping_strings': []
     # }
 
-    # with open('generation_params_override.json', 'r') as f:
-    #     overrides = json.load(f)
-    #     request.update(overrides)
-
-    
-
-    
 async def chat_inference(channelID: str, messages: List[dict[str, str]]):
     history_file = f"history/{channelID}.json"
     try:
@@ -141,4 +143,4 @@ async def chat_inference(channelID: str, messages: List[dict[str, str]]):
     return reply
 
 if __name__ == '__main__':
-    asyncio.run(chat_inference("exampleChannel", [{"user": "Carl", "message": "Who are you?"}]))
+    asyncio.run(chat_inference("exampleChannel", [{"user": "Carl", "message": "What's my username?"}]))

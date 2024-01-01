@@ -9,7 +9,7 @@ import asyncio
 import discord
 from discord import Guild, Message
 
-from .api_inference import chat_inference
+from .openai_inference import chat_inference
 from .utils import get_config, dequote
 
 @dataclass
@@ -172,9 +172,11 @@ class Bot(discord.Client):
             self.pendingMessages[channelID] = []
             channel = self.get_channel(channelID)
             async with channel.typing():
-                loop = asyncio.get_running_loop()
-                response = await loop.run_in_executor(None, lambda: chat_inference(channelID, pending))
-            
+                try:
+                    response = await chat_inference(channelID, pending)
+                except Exception as e:
+                    print(e)
+                    response = ""
             if len(response) > 0:
                 await channel.send(clean_response(response))
             else:
