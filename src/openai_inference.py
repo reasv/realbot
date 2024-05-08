@@ -26,7 +26,7 @@ async def run_inference(history, last_username: str):
 
     options = {
         "max_tokens": 250,
-        "stop": ["\n\n", "</m>", "</s>"],
+        "stop": ["\n\n", "\n", "</m>", "</s>"],
         "temperature": 0.8,
     }
     overrides = {}
