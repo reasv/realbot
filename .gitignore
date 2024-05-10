@@ -5,3 +5,5 @@ history/*/*.json
 user.config.toml
 characters/*
 !characters/default.toml
+
+*.user.config.toml
