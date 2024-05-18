@@ -115,10 +115,11 @@ async def chat_inference(channelID: str, messages: List[dict[str, str]]):
 
     character_name: str = get_character()['name']
     config = get_config()
-
+    ctx_len = config["prompt"]["ctx_len"]
     prompt = ""
     last_username = ""
-    for message in history['messages'][-30:]:
+    for msg in history['messages'][-ctx_len:]:
+        message = msg.copy()
         message_format = config["prompt"]["user_message_format"]
         if message['user'] == "{{char}}":
             message_format = config["prompt"]["bot_message_format"]
