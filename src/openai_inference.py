@@ -4,19 +4,22 @@ import openai
 import asyncio
 import os
 from dotenv import load_dotenv
+import re
 
 async def run_inference(history: List[dict[str, str]]):
     load_dotenv()
+    openai_url = os.getenv("OPENAPI_API_URL", "test")
     client = openai.AsyncOpenAI(
-        base_url=os.getenv("OPENAPI_API_URL", "https://api.openai.com"),
+        base_url=openai_url,
         api_key=os.getenv("OPENAI_API_KEY")
     )
+    username = os.getenv("BOT_NAME")
     completion = await client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
             {
                 "role": "system",
-                "content": "This is a conversation between multiple users in an online chat. You are rei. Reply to the conversation as if you are rei."
+                "content": f"This is a conversation between multiple users in an online chat. You are {username}. Reply to the conversation roleplaying as {username}. Never write messages for other users, only for {username}. Write a single chat message at a time. Always stay in character.",
             },
             *normalize_chat_history(history), # type: ignore
         ],
@@ -121,6 +124,11 @@ async def chat_inference(channelID: str, messages: List[dict[str, str]]):
     save_history()
 
     print(reply)
+    # Remove username: at the start of the message
+    load_dotenv()
+    username = os.getenv("BOT_NAME")
+    if reply and reply.startswith(f"{username}: "):
+        reply = reply[len(f"{username}: "):]
     return reply
 
 if __name__ == '__main__':
