@@ -13,12 +13,6 @@ def get_config():
     config = always_merger.merge(config, overrides)
     return config
 
-def get_character():
-    name = get_config()['prompt']['character_card']
-    with open(f'characters/{name}.toml', 'rb') as f:
-        char = tomllib.load(f)
-    return char
-
 def dequote(s):
     """
     If a string has single or double quotes around it, remove them.
