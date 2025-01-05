@@ -168,25 +168,37 @@ class Bot(discord.Client):
     
     async def process_messages(self):
         channelIDs = list(self.pendingMessages.keys())
+        tasks = []
+        
         for channelID in channelIDs:
             pending = self.pendingMessages.get(channelID, [])
             if len(pending) == 0:
                 continue
+                
             self.pendingMessages[channelID] = []
             channel = self.get_channel(channelID)
             if not isinstance(channel, discord.abc.Messageable):
                 print(f"Channel {channelID} is not a Messageable")
                 continue
-            async with channel.typing():
-                try:
-                    response = await chat_inference(channelID, pending)
-                except Exception as e:
-                    print(e)
-                    response = ""
-            if response and len(response) > 0:
-                await channel.send(clean_response(response))
-            else:
-                print("No response")
+                
+            # Create coroutine but don't await it yet
+            async def process_channel(channel: discord.abc.Messageable, channelID: int, messages: List[dict[str, str]]):
+                async with channel.typing():
+                    try:
+                        response = await chat_inference(channelID, messages)
+                    except Exception as e:
+                        print(e)
+                        response = None
+
+                if response and len(response) > 0:
+                    await channel.send(clean_response(response))
+                else:
+                    print("No response")
+                    
+            tasks.append(process_channel(channel, channelID, pending))
+        
+        # Run all tasks concurrently
+        await asyncio.gather(*tasks)
     
     async def inference_loop_task(self):
         await self.wait_until_ready()
