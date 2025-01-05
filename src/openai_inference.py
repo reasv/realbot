@@ -85,7 +85,7 @@ def normalize_chat_history(history: List[Dict[str, str]]) -> List[Dict[str, str]
     return normalized_history
 
 
-async def chat_inference(channelID: str, messages: List[dict[str, str]]):
+async def chat_inference(channelID: int, messages: List[dict[str, str]]):
     history_file = f"history/{channelID}.json"
     try:
         with open(history_file, "r") as f:
@@ -132,4 +132,4 @@ async def chat_inference(channelID: str, messages: List[dict[str, str]]):
     return reply
 
 if __name__ == '__main__':
-    asyncio.run(chat_inference("exampleChannel", [{"user": "Carl", "message": "What's my username?"}]))
+    asyncio.run(chat_inference(1, [{"user": "Carl", "message": "What's my username?"}]))

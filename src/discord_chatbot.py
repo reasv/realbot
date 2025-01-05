@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import asyncio
 import discord
-from discord import Guild, Message
+from discord import Guild, Member, Message
 
 from .openai_inference import chat_inference
 from .utils import get_config, dequote
@@ -32,7 +32,7 @@ class Bot(discord.Client):
 
     async def on_message(self, message: Message):
         print(f'Message in {message.channel.id} from {message.author}: {message.content}')
-        
+        assert self.user is not None, "User is None"
         if message.author.id == self.user.id:
             return
 
@@ -109,6 +109,7 @@ class Bot(discord.Client):
         print(f"Starting random chat in {message.channel.id} from {datetime.datetime.now()} to {self.randomChats[message.channel.id].endTime}. Will not chat again until {self.randomChats[message.channel.id].nextChatTime}")
 
     def isMentioned(self, message: Message):
+        assert self.user is not None, "User is None"
         for mention in message.mentions:
             if (self.user.id == mention.id):
                 return True
@@ -116,6 +117,7 @@ class Bot(discord.Client):
 
     async def processMessage(self, message: Message):
         if (message.guild):
+            assert isinstance(message.author, Member), "Message author is not a Member"
             username = message.author.nick or await self.getName(message.author.id, message.guild)
             content = await self.cleanContent(message.content, message.guild)
         else:
@@ -125,6 +127,7 @@ class Bot(discord.Client):
         return {"user": username, "message": content}
 
     async def getName(self, id: int, guild: Guild) -> str | None:
+        assert self.user is not None, "User is None"
         if id == self.user.id:
             return "{{char}}"
         try:
@@ -144,7 +147,7 @@ class Bot(discord.Client):
             return user.name
 
     async def cleanContent(self, content: str, guild: Guild | None) -> str:
-        mentions = re.compile('<@([\d]+)>')
+        mentions = re.compile(r'<@([\d]+)>')
         result = content
         if guild:
             for match in mentions.finditer(content):
@@ -152,7 +155,7 @@ class Bot(discord.Client):
                 username: str | None = await self.getName(int(user_id), guild)
                 if (username):
                     result = result.replace(match.group(0), f"@{username}")
-        emoji = re.compile('<[\w]*:([\w]+):[\d]+>')
+        emoji = re.compile(r'<[\w]*:([\w]+):[\d]+>')
         for match in emoji.finditer(content):
             result = result.replace(match.group(0), f":{match.group(1)}:")
 
@@ -171,13 +174,16 @@ class Bot(discord.Client):
                 continue
             self.pendingMessages[channelID] = []
             channel = self.get_channel(channelID)
+            if not isinstance(channel, discord.abc.Messageable):
+                print(f"Channel {channelID} is not a Messageable")
+                continue
             async with channel.typing():
                 try:
                     response = await chat_inference(channelID, pending)
                 except Exception as e:
                     print(e)
                     response = ""
-            if len(response) > 0:
+            if response and len(response) > 0:
                 await channel.send(clean_response(response))
             else:
                 print("No response")
