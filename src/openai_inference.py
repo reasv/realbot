@@ -85,7 +85,7 @@ def normalize_chat_history(history: List[Dict[str, str]]) -> List[Dict[str, str]
     return normalized_history
 
 
-async def chat_inference(channelID: int, messages: List[dict[str, str]]):
+async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
     history_file = f"history/{channelID}.json"
     try:
         with open(history_file, "r") as f:
