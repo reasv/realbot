@@ -94,7 +94,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         """
         Called when the bot is disconnected from the server.
         """
-        print("[Bot] Disconnected.")
+        print(f"[Bot] Disconnected. {event.source} {event.arguments}")
         if self.bg_task:
             self.bg_task.cancel()
             self.bg_task = None
