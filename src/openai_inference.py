@@ -4,7 +4,6 @@ import openai
 import asyncio
 import os
 from dotenv import load_dotenv
-import re
 
 async def run_inference(history: List[dict[str, str]]):
     load_dotenv()
@@ -14,15 +13,17 @@ async def run_inference(history: List[dict[str, str]]):
         api_key=os.getenv("OPENAI_API_KEY")
     )
     username = os.getenv("BOT_NAME")
-    completion = await client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
+    message_history = [
             {
                 "role": "system",
                 "content": f"This is a conversation between multiple users in an online chat. You are {username}. Reply to the conversation roleplaying as {username}. Never write messages for other users, only for {username}. Write a single chat message at a time. Always stay in character.",
             },
-            *normalize_chat_history(history), # type: ignore
-        ],
+            *normalize_chat_history(history),
+        ]
+    print(message_history)
+    completion = await client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=message_history,  # type: ignore
     )
     return {
         "message": completion.choices[0].message.content,
@@ -86,6 +87,10 @@ def normalize_chat_history(history: List[Dict[str, str]]) -> List[Dict[str, str]
 
 
 async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
+    load_dotenv()
+    username = os.getenv("BOT_NAME")
+    assert username is not None, "Error. Please set the BOT_NAME environment variable."
+
     history_file = f"history/{channelID}.json"
     try:
         with open(history_file, "r") as f:
@@ -103,15 +108,19 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
     formatted_messages = []
     for msg in history['messages'][-ctx_len:]:
         message = msg.copy()
-        if message['user'] == "{{char}}":
+        msg_user: str = message['user']
+        msg_content: str = message['message']
+        msg_content = msg_content.replace("{{char}}", username)
+
+        if msg_user == "{{char}}":
             formatted_messages.append({
                 "role": "assistant",
-                "content": message['message']
+                "content": msg_content
             })
         else:
             formatted_messages.append({
                 "role": "user",
-                "content": f"{message['user']}: "+message['message']
+                "content": f"{msg_user}: {msg_content}"
             })
     
     reply = (await run_inference(formatted_messages))["message"]
@@ -124,12 +133,10 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
     save_history()
 
     print(reply)
-    # Remove username: at the start of the message
-    load_dotenv()
-    username = os.getenv("BOT_NAME")
+    # Remove "username: " from the start of the message
     if reply and reply.startswith(f"{username}: "):
         reply = reply[len(f"{username}: "):]
     return reply
 
 if __name__ == '__main__':
-    asyncio.run(chat_inference(1, [{"user": "Carl", "message": "What's my username?"}]))
+    asyncio.run(chat_inference(1, [{"user": "Carl", "message": "What's your username, {{char}}?"}]))

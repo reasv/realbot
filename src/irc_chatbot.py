@@ -2,6 +2,7 @@ import asyncio
 import os
 import random
 import datetime
+import re
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
@@ -28,6 +29,8 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         self.nickname = nickname
         self.channels = channels
         self.use_ssl = use_ssl
+        # Regex for matching IRC mentions
+        self.mention_re = re.compile(rf"\b{re.escape(self.nickname)}\b", re.I)
 
         # Holds inbound messages waiting for inference:
         #   { "#channel": [ {"user": "...", "message": "..."}, ... ] }
@@ -146,7 +149,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
     def is_mentioned(self, text: str) -> bool:
         """Check if our nickname is in the text."""
-        return self.nickname.lower() in text.lower()
+        return bool(self.mention_re.search(text))
 
     # ----------------------------------------------------------------------
     # Chat Behaviors
@@ -224,8 +227,10 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
     def clean_content(self, content: str) -> str:
         """
-        If you want to emulate Discord-style mention/emoji conversions, do so here.
+        Clean messages
         """
+        # Replace nickname mentions with a placeholder
+        content = self.mention_re.sub("{{char}}", content)
         return content.strip()
 
     def add_to_queue(self, channel: str, msg: dict):
