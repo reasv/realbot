@@ -10,7 +10,7 @@ from .utils import normalize_chat_history
 
 async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30):
     load_dotenv()
-    openai_url = os.getenv("OPENAPI_API_URL", "test")
+    openai_url = os.getenv("OPENAI_API_URL", "test")
     client = openai.AsyncOpenAI(
         base_url=openai_url,
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -24,7 +24,6 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
             },
             *normalize_chat_history(history),
         ]
-    print(message_history)
     
     try:
         completion = await client.chat.completions.create(
