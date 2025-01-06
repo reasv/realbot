@@ -1,4 +1,3 @@
-# aio_irc_bot.py
 import asyncio
 import os
 import random
@@ -9,10 +8,10 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 import irc.client
 import irc.client_aio
+import irc.connection
 
-from .openai_inference import chat_inference  # your async inference
+from .openai_inference import chat_inference
 from .utils import get_config, dequote
-
 
 @dataclass
 class RandomChat:
@@ -25,21 +24,11 @@ class RandomChat:
 
 
 class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
-    """
-    An asyncio-based IRC bot using jaraco/irc's client_aio module.
-    - Whitelist-based "constant_chat" vs. "random_chat"
-    - Mention detection
-    - Queues messages for inference in a background loop
-    """
-
-    def __init__(self, nickname: str, channels: List[str]):
-        """
-        Note: AioSimpleIRCClient.__init__() automatically creates self.reactor
-        (an AioReactor) and self.connection (an AioConnection).
-        """
+    def __init__(self, nickname: str, channels: List[str], use_ssl: bool = True):
         super().__init__()
         self.nickname = nickname
         self.channels = channels
+        self.use_ssl = use_ssl
 
         # Holds inbound messages waiting for inference:
         #   { "#channel": [ {"user": "...", "message": "..."}, ... ] }
@@ -54,6 +43,21 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
     # ----------------------------------------------------------------------
     # Overridden IRC handlers
     # ----------------------------------------------------------------------
+    async def connect(self, server: str, port: int, nickname: str): # type: ignore
+        """
+        Connect using AioFactory with SSL if enabled
+        """
+        factory = irc.connection.AioFactory(ssl=self.use_ssl)
+        try:
+            await self.connection.connect(
+                server=server,
+                port=port,
+                nickname=nickname,
+                connect_factory=factory # type: ignore
+            ) # type: ignore
+        except Exception as e:
+            print(f"[Bot] Connection failed: {e}")
+            raise
 
     def on_welcome(self, connection, event):
         """
@@ -69,8 +73,11 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         # Launch background loop (only once).
         if not self.bg_task:
             # self.reactor.loop is the asyncio event loop used by this library.
-            self.bg_task = asyncio.ensure_future(self._background_loop(),
-                                                 loop=self.reactor.loop)
+            print("[Bot] Starting background inference loop.")
+            self.bg_task = asyncio.ensure_future(
+                self._background_loop(),
+                loop=self.reactor.loop # type: ignore
+            )
 
     def on_join(self, connection, event):
         """
@@ -92,7 +99,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
         # Stop the reactor loop so `start()` returns.
         try:
-            self.reactor.loop.stop()
+            self.reactor.loop.stop() # type: ignore
         except Exception:
             pass
 
@@ -148,7 +155,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
     def constant_chat(self, channel: str, message: dict):
         """
-        Always respond to this message (like "constantChat" in Discord code).
+        Always respond to this message.
         """
         processed = self.process_incoming_message(message)
         self.add_to_queue(channel, processed)
@@ -258,7 +265,6 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
             except Exception as e:
                 print(f"[{channel}] chat_inference error: {e}")
                 response = ""
-
             
             if response:
                 response = self.clean_response(response)
@@ -278,23 +284,31 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 # ------------------------------------------------------------------------------
 
 def run_bot():
-    """
-    Example runner that:
-    1) Creates the bot,
-    2) Connects to the server,
-    3) Starts the reactor loop (blocking).
-    """
     config = get_config_from_env()
     print(f"Connecting to {config['server']}:{config['port']} as {config['nickname']} in {config['channel']}")
-    bot = AioIrcBot(nickname=config["nickname"], channels=[config["channel"]])
-
-    # `connect` calls internally `self.reactor.loop.run_until_complete(...)`
-    # and will block until the connection handshake is done or fails.
-    bot.connect(config["server"], config["port"], config["nickname"])
-
-    # Now start the reactor's event loop forever. This will block
-    # until the loop is stopped (e.g. on disconnect).
-    bot.start()
+    
+    use_ssl = config.get('use_ssl', True)
+    bot = AioIrcBot(
+        nickname=config["nickname"], 
+        channels=[config["channel"]], 
+        use_ssl=use_ssl
+    )
+    loop = None
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(
+            bot.connect(config["server"], config["port"], config["nickname"])
+        )
+        bot.start()
+    except KeyboardInterrupt:
+        print("[Bot] Received keyboard interrupt, shutting down...")
+    except Exception as e:
+        print(f"[Bot] Error: {e}")
+    finally:
+        if hasattr(bot, 'connection') and bot.connection:
+            bot.connection.disconnect()
+        if loop and loop.is_running():
+            loop.stop()
 
 def get_config_from_env():
     load_dotenv()
