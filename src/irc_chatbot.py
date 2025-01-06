@@ -265,7 +265,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
                     response = await chat_inference(channel, pending)
                 except Exception as e:
                     print(f"[{channel}] chat_inference error: {e}")
-                    response = ""
+                    response = None
                 
                 if response:
                     response = self.clean_response(response)
