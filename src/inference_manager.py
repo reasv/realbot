@@ -1,12 +1,8 @@
-# inference_manager.py
-
-import json
-import os
 import asyncio
-import multiprocessing
+from multiprocessing import Process, Queue, Manager
 from multiprocessing import Queue, Manager
 from typing import List, Dict, Tuple
-from openai_inference import InferenceClient
+from .openai_inference import InferenceClient
 
 class InferenceManager:
     def __init__(self, input_queue: Queue, output_queues: Dict[Tuple[str, str], Queue]):
@@ -85,3 +81,15 @@ class InferenceManager:
 def inference_manager_process(input_queue: Queue, output_queues: Dict[Tuple[str, str], Queue]):
     manager = InferenceManager(input_queue, output_queues)
     asyncio.run(manager.main_loop())
+
+
+def start_inference_manager():
+    manager = Manager()
+    input_queue = manager.Queue()
+    output_queues = manager.dict()  # Keys: (bot_name, channel_id), Values: Queue
+
+    # Start the inference manager process
+    inference_process = Process(target=inference_manager_process, args=(input_queue, output_queues))
+    inference_process.start()
+
+    return input_queue, output_queues, inference_process
