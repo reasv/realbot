@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 from typing import List, Dict
 
-from utils import format_chat_history, normalize_chat_history
+from .utils import format_chat_history, normalize_chat_history
 class InferenceClient:
     def __init__(self):
         return
@@ -83,12 +83,9 @@ class InferenceClient:
         client = self.get_openai_client()
         fallback_timeout = self.get_inference_timeout() + 2
         try:
-            completion = await asyncio.wait_for(
-                client.chat.completions.create(
+            completion = await client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=messages,  # type: ignore
-                ),
-                timeout=fallback_timeout
             )
             return completion.choices[0].message.content
         except asyncio.TimeoutError:
@@ -124,13 +121,10 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
     print(message_history)
     
     try:
-        completion = await asyncio.wait_for(
-            client.chat.completions.create(
+        completion = await client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=message_history,  # type: ignore
-            ),
-            timeout=timeout_seconds
-        )
+            )
         return {
             "message": completion.choices[0].message.content,
         }
