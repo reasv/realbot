@@ -34,8 +34,8 @@ class InferenceClient:
         )
         return client
     
-    def load_history(self, channelID: int | str):
-        history_file = f"history/{channelID}.json"
+    def load_history(self, channelID: int | str, botname: str):
+        history_file = f"history/{botname}/{channelID}.json"
         try:
             with open(history_file, "r") as f:
                 history: dict[str, list] = json.load(f)
@@ -43,11 +43,19 @@ class InferenceClient:
             return []
         return history['messages']
     
-    def save_history(self, channelID: int | str, history: List[dict[str, str]]):
-        history_file = f"history/{channelID}.json"
+    def save_history(self, channelID: int | str, botname: str, history: List[dict[str, str]]):
+        history_file = f"history/{botname}/{channelID}.json"
         os.makedirs(os.path.dirname(history_file), exist_ok=True)
         with open(history_file, "w") as f:
             json.dump({"messages": history}, f, indent=2)
+
+    def append_history_reply(self, channelID: int | str, botname: str, reply: str):
+        history = self.load_history(channelID, botname)
+        history.append({
+            'user': "{{char}}",
+            'message': reply
+        })
+        self.save_history(channelID, botname, history)
 
     def format_chat(self, history: List[dict[str, str]], max_ctx: int = 128):
         username = self.get_bot_name()
@@ -69,23 +77,6 @@ class InferenceClient:
                     "content": f"{msg_user}: {msg_content}"
                 })
         return format_chat_history(formatted_messages, username)
-    
-    async def chat_inference(self, channelID: int | str, messages: List[dict[str, str]]):
-        history = self.load_history(channelID)
-        history.extend(messages)
-        self.save_history(channelID, history)
-        formatted_messages = self.format_chat(history)
-        reply = await self.run_inference(formatted_messages)
-        if reply is None:
-            return None
-        history.append({
-            'user': "{{char}}",
-            'message': reply
-        })
-        self.save_history(channelID, history)
-
-        print(reply)
-        return self.clean_generated_message(reply)
 
     async def run_inference(self, messages: List[dict[str, str]]):
         print(messages)
