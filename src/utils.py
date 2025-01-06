@@ -1,7 +1,6 @@
 import tomllib
-from typing import List
+from typing import Dict, List
 from deepmerge import always_merger
-from discord import Dict
 
 def get_config():
     with open('default.config.toml', 'rb') as f:
