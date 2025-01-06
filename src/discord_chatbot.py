@@ -31,7 +31,7 @@ class Bot(discord.Client):
         self.bg_task = self.loop.create_task(self.inference_loop_task())
 
     async def on_message(self, message: Message):
-        print(f'Message in {message.channel.id} from {message.author}: {message.content}')
+        #print(f'Message in {message.channel.id} from {message.author}: {message.content}')
         assert self.user is not None, "User is None"
         if message.author.id == self.user.id:
             return
@@ -153,7 +153,7 @@ class Bot(discord.Client):
             for match in mentions.finditer(content):
                 user_id = match.group(1)
                 username: str | None = await self.getName(int(user_id), guild)
-                if (username):
+                if username:
                     result = result.replace(match.group(0), f"@{username}")
         emoji = re.compile(r'<[\w]*:([\w]+):[\d]+>')
         for match in emoji.finditer(content):
@@ -162,6 +162,7 @@ class Bot(discord.Client):
         return result
     
     def addToQueue(self, channelID: int, message: dict[str, str]):
+        print(f"[{channelID}] {message['user']}: {message['message']}")
         queue = self.pendingMessages.get(channelID, [])
         queue.append(message)
         self.pendingMessages[channelID] = queue
