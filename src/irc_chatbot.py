@@ -22,7 +22,6 @@ class RandomChat:
     nextChatTime: datetime.datetime
     lastMessage: dict  # e.g. {"nick": str, "content": str}
 
-
 class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
     def __init__(self, nickname: str, channels: List[str], use_ssl: bool = True):
         super().__init__()
@@ -233,6 +232,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         """
         Store message in the channel's queue to be handled by the background loop.
         """
+        print(f"[{channel}] {msg['user']}: {msg['message']}")
         self.pendingMessages.setdefault(channel, []).append(msg)
 
     async def _background_loop(self):
@@ -285,12 +285,12 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
 def run_bot():
     config = get_config_from_env()
-    print(f"Connecting to {config['server']}:{config['port']} as {config['nickname']} in {config['channel']}")
+    print(f"Connecting to {config['server']}:{config['port']} as {config['nickname']} in {config['channels']}")
     
     use_ssl = config.get('use_ssl', True)
     bot = AioIrcBot(
         nickname=config["nickname"], 
-        channels=[config["channel"]], 
+        channels=config["channels"],
         use_ssl=use_ssl
     )
     loop = None
@@ -316,6 +316,6 @@ def get_config_from_env():
     return {
         "server": os.getenv("IRC_SERVER", "irc.freenode.net"),
         "port": int(os.getenv("IRC_PORT", "6697")),
-        "channel": channels[0],
+        "channels": channels,
         "nickname": os.getenv("IRC_NICKNAME", "SimpleBot124")
     }
