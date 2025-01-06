@@ -4,13 +4,15 @@ import openai
 import asyncio
 import os
 from dotenv import load_dotenv
+from typing import List, Dict
 
-async def run_inference(history: List[dict[str, str]]):
+async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30):
     load_dotenv()
     openai_url = os.getenv("OPENAPI_API_URL", "test")
     client = openai.AsyncOpenAI(
         base_url=openai_url,
-        api_key=os.getenv("OPENAI_API_KEY")
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=timeout_seconds
     )
     username = os.getenv("BOT_NAME")
     message_history = [
@@ -21,15 +23,24 @@ async def run_inference(history: List[dict[str, str]]):
             *normalize_chat_history(history),
         ]
     print(message_history)
-    completion = await client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=message_history,  # type: ignore
-    )
-    return {
-        "message": completion.choices[0].message.content,
-    }
-
-from typing import List, Dict
+    
+    try:
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=message_history,  # type: ignore
+            ),
+            timeout=timeout_seconds
+        )
+        return {
+            "message": completion.choices[0].message.content,
+        }
+    except asyncio.TimeoutError:
+        print(f"Inference timed out after {timeout_seconds} seconds")
+        return None
+    except Exception as e:
+        print(f"Error during inference: {str(e)}")
+        return None
 
 def normalize_chat_history(history: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
@@ -86,7 +97,7 @@ def normalize_chat_history(history: List[Dict[str, str]]) -> List[Dict[str, str]
     return normalized_history
 
 
-async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
+async def chat_inference(channelID: int | str, messages: List[dict[str, str]], timeout_seconds: int = 60):
     load_dotenv()
     username = os.getenv("BOT_NAME")
     assert username is not None, "Error. Please set the BOT_NAME environment variable."
@@ -99,6 +110,7 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
         history = {'messages': []}
 
     def save_history():
+        os.makedirs(os.path.dirname(history_file), exist_ok=True)
         with open(history_file, "w") as f:
             json.dump(history, f, indent=2)
     
@@ -123,8 +135,11 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, str]]):
                 "content": f"{msg_user}: {msg_content}"
             })
     
-    reply = (await run_inference(formatted_messages))["message"]
-
+    result = await run_inference(formatted_messages, timeout_seconds)
+    if result is None:
+        return None
+        
+    reply = result["message"]
     history['messages'].append({
         'user': "{{char}}",
         'message': reply
