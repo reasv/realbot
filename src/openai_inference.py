@@ -6,6 +6,8 @@ import os
 from dotenv import load_dotenv
 from typing import List, Dict
 
+from utils import format_chat_history, normalize_chat_history
+
 async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30):
     load_dotenv()
     openai_url = os.getenv("OPENAPI_API_URL", "test")
@@ -41,61 +43,6 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
     except Exception as e:
         print(f"Error during inference: {str(e)}")
         return None
-
-def normalize_chat_history(history: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """
-    Normalizes the chat history to the format that OpenAI expects.
-    This means ensuring that we have alternating user and assistant messages,
-    merging consecutive messages from the same role into a single message,
-    and that the first message is always from the user starting with "<Chat History>".
-
-    Parameters:
-        history (List[Dict[str, str]]): The original chat history.
-
-    Returns:
-        List[Dict[str, str]]: The normalized chat history.
-    """
-    if not isinstance(history, list):
-        raise TypeError("History must be a list of dictionaries.")
-    
-    # Step 1: Ensure the first message is from the user and starts with "<Chat History>"
-    normalized_history = []
-    if not history or history[0].get("role") != "user":
-        # Prepend a user message with "<Chat History>"
-        normalized_history.append({"role": "user", "content": "<Chat History>"})
-    else:
-        # First message is from user; ensure it starts with "<Chat History>"
-        first_content = history[0].get("content", "")
-        if not first_content.startswith("<Chat History>"):
-            first_content = "<Chat History>\n" + first_content
-        normalized_history.append({"role": "user", "content": first_content})
-        # Start processing from the second message
-        history = history[1:]
-    
-    # Step 2: Iterate through the history and merge consecutive messages from the same role
-    for message in history:
-        role = message.get("role")
-        content = message.get("content", "").strip()
-        
-        if not role or not isinstance(content, str):
-            # Skip messages with invalid structure
-            continue
-        
-        if not normalized_history:
-            # This should not happen, but just in case
-            normalized_history.append({"role": role, "content": content})
-            continue
-        
-        last_message = normalized_history[-1]
-        if role == last_message["role"]:
-            # Merge contents with a newline
-            last_message["content"] += "\n" + content
-        else:
-            # Append as a new message
-            normalized_history.append({"role": role, "content": content})
-    
-    return normalized_history
-
 
 async def chat_inference(channelID: int | str, messages: List[dict[str, str]], timeout_seconds: int = 60):
     load_dotenv()
@@ -152,6 +99,113 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, str]], t
     if reply and reply.startswith(f"{username}: "):
         reply = reply[len(f"{username}: "):]
     return reply
+
+class InferenceClient:
+    def __init__(self):
+        return
+    def get_inference_timeout(self):
+        load_dotenv()
+        return int(os.getenv("INFERENCE_TIMEOUT", 30))
+
+    def get_bot_name(self):
+        load_dotenv()
+        username = os.getenv("BOT_NAME")
+        assert username is not None, "Error. Please set the BOT_NAME environment variable."
+        return username
+
+    def get_openai_client(self):
+        load_dotenv()
+        api_url = os.getenv("OPENAI_API_URL")
+        api_key = os.getenv("OPENAI_API_KEY")
+        assert api_url is not None, "Error. Please set the OPENAI_API_URL environment variable."
+        assert api_key is not None, "Error. Please set the OPENAI_API_KEY environment variable."
+        client = openai.OpenAI(
+            base_url=api_url,
+            api_key=os.getenv("OPENAI_API_KEY"),
+            timeout=self.get_inference_timeout()
+        )
+        return client
+    
+    def load_history(self, channelID: int | str):
+        history_file = f"history/{channelID}.json"
+        try:
+            with open(history_file, "r") as f:
+                history: dict[str, list] = json.load(f)
+        except:
+            return []
+        return history['messages']
+    
+    def save_history(self, channelID: int | str, history: List[dict[str, str]]):
+        history_file = f"history/{channelID}.json"
+        os.makedirs(os.path.dirname(history_file), exist_ok=True)
+        with open(history_file, "w") as f:
+            json.dump({"messages": history}, f, indent=2)
+
+    def format_chat(self, history: List[dict[str, str]], max_ctx: int = 128):
+        username = self.get_bot_name()
+        formatted_messages = []
+        for msg in history[-max_ctx:]:
+            message = msg.copy()
+            msg_user: str = message['user']
+            msg_content: str = message['message']
+            msg_content = msg_content.replace("{{char}}", username)
+
+            if msg_user == "{{char}}":
+                formatted_messages.append({
+                    "role": "assistant",
+                    "content": msg_content
+                })
+            else:
+                formatted_messages.append({
+                    "role": "user",
+                    "content": f"{msg_user}: {msg_content}"
+                })
+        return format_chat_history(formatted_messages, username)
+    
+    async def chat_inference(self, channelID: int | str, messages: List[dict[str, str]]):
+        history = self.load_history(channelID)
+        history.extend(messages)
+        self.save_history(channelID, history)
+        formatted_messages = self.format_chat(history)
+        reply = await self.run_inference(formatted_messages)
+        if reply is None:
+            return None
+        history.append({
+            'user': "{{char}}",
+            'message': reply
+        })
+        self.save_history(channelID, history)
+
+        print(reply)
+        return self.clean_generated_message(reply)
+
+    async def run_inference(self, messages: List[dict[str, str]]):
+        print(messages)
+        client = self.get_openai_client()
+        fallback_timeout = self.get_inference_timeout() + 2
+        try:
+            completion = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,  # type: ignore
+                ),
+                timeout=fallback_timeout
+            )
+            return completion.choices[0].message.content
+        except asyncio.TimeoutError:
+            print(f"Inference forcefully timed out after {fallback_timeout} seconds")
+            return None
+        except Exception as e:
+            print(f"Error during inference: {str(e)}")
+            return None
+    
+    def clean_generated_message(self, message: str):
+        # Remove "username: " from the start of the message
+        username = self.get_bot_name()
+        if message.startswith(f"{username}: "):
+            message = message[len(f"{username}: "):]
+        return message
+        
 
 if __name__ == '__main__':
     asyncio.run(chat_inference(1, [{"user": "Carl", "message": "What's your username, {{char}}?"}]))
