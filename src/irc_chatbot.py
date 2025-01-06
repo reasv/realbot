@@ -249,6 +249,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         """
         For each channel's queued messages, call chat_inference and send a response.
         """
+        tasks = []
         # We'll snapshot channel list so we don't modify the dictionary while iterating
         channels = list(self.pendingMessages.keys())
         for channel in channels:
@@ -258,19 +259,25 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
             # Clear out the queue
             self.pendingMessages[channel] = []
+            async def process_channel(channel: str, pending: List[dict[str, str]]):
+                try:
+                    # Await your async inference call
+                    response = await chat_inference(channel, pending)
+                except Exception as e:
+                    print(f"[{channel}] chat_inference error: {e}")
+                    response = ""
+                
+                if response:
+                    response = self.clean_response(response)
+                    # Send message back to IRC. Note that this is synchronous, but it's safe
+                    # in this library as we are still within the same event loop context.
+                    self.connection.privmsg(channel, response)
+                else:
+                    print(f"[{channel}] No response from chat_inference.")
+            tasks.append(process_channel(channel, pending))
 
-            try:
-                # Await your async inference call
-                response = await chat_inference(channel, pending)
-            except Exception as e:
-                print(f"[{channel}] chat_inference error: {e}")
-                response = ""
-            
-            if response:
-                response = self.clean_response(response)
-                # Send message back to IRC. Note that this is synchronous, but it's safe
-                # in this library as we are still within the same event loop context.
-                self.connection.privmsg(channel, response)
+        # Run all tasks concurrently
+        await asyncio.gather(*tasks)
 
     def clean_response(self, resp: str) -> str:
         """
