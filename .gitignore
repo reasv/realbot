@@ -8,3 +8,4 @@ characters/*
 
 *.user.config.toml
 scripts/
+overrides.json

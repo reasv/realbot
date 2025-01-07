@@ -24,11 +24,19 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
             },
             *normalize_chat_history(history),
         ]
-    
+    # Load override parameters from a json file
+    override_file = os.getenv("SAMPLING_OVERRIDE_FILE")
+    if override_file is not None:
+        with open(override_file, "r") as f:
+            override_params = json.load(f)
+    else:
+        override_params = {}
     try:
         completion = await client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=message_history,  # type: ignore
+                max_tokens=150,
+                extra_body=override_params,
             )
         return {
             "message": completion.choices[0].message.content,
