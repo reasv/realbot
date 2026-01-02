@@ -35,6 +35,7 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
     username = os.getenv("BOT_NAME")
     config = get_config()
     openai_model = config.get("openai", {}).get("model", "default")
+    print(f"Using model: {openai_model}")
     message_history = [
             {
                 "role": "system",
