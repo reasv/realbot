@@ -332,13 +332,20 @@ class Bot(discord.Client):
                 i += 1
                 continue
 
-            # Limit how far we try to interpret a name if no punctuation ends it.
             words = raw_segment.split()
-            if len(words) > 4:
-                words = words[:4]
+            if not words:
+                out.append(ch)
+                i += 1
+                continue
+
+            # Prefer single-token mentions (e.g. @Alice). If that doesn't resolve, fall back to
+            # capturing one more word to support two-word names (e.g. @Alice Smith).
+            word_counts_to_try = [1]
+            if len(words) >= 2:
+                word_counts_to_try.append(2)
 
             replaced = False
-            for k in range(len(words), 0, -1):
+            for k in word_counts_to_try:
                 candidate_base = " ".join(words[:k])
                 if not candidate_base:
                     continue
