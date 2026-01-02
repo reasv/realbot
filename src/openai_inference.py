@@ -29,7 +29,7 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
     openai_url = os.getenv("OPENAI_API_URL", "test")
     client = openai.AsyncOpenAI(
         base_url=openai_url,
-        api_key=os.getenv("OPENAI_API_KEY"),
+        api_key=os.getenv("LLM_API_KEY"),
         timeout=timeout_seconds
     )
     username = os.getenv("BOT_NAME")
