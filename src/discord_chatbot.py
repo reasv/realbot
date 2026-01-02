@@ -221,7 +221,7 @@ class Bot(discord.Client):
         return result
 
     def _is_mention_boundary_char(self, ch: str) -> bool:
-        return ch.isspace() or ch in "\"'`.,!?;:()[]{}<>"
+        return ch.isspace() or ch in "\"'`,!?;:()[]{}<>"
 
     def _get_mention_indexes_for_guild(self, guild: Guild) -> tuple[dict[str, int], dict[str, int]]:
         now = time.time()
@@ -325,8 +325,8 @@ class Bot(discord.Client):
                 continue
 
             tail = content[i + 1 :]
-            stop_match = re.match(r"^[^\r\n,!.?:;]+", tail)
-            raw_segment = (stop_match.group(0) if stop_match else tail).strip()
+            stop_match = re.match(r"^[^\r\n]+", tail)
+            raw_segment = (stop_match.group(0) if stop_match else tail)[:64].strip()
             if not raw_segment:
                 out.append(ch)
                 i += 1
@@ -339,25 +339,34 @@ class Bot(discord.Client):
 
             replaced = False
             for k in range(len(words), 0, -1):
-                candidate = " ".join(words[:k]).rstrip("\"'`.,!?;:()[]{}<>")
-                if not candidate:
+                candidate_base = " ".join(words[:k])
+                if not candidate_base:
                     continue
 
-                if not tail[: len(candidate)].casefold() == candidate.casefold():
+                if not tail[: len(candidate_base)].casefold() == candidate_base.casefold():
                     continue
 
-                after_idx = i + 1 + len(candidate)
-                if after_idx < len(content) and not self._is_mention_boundary_char(content[after_idx]):
-                    continue
+                candidates_to_try = [candidate_base]
+                candidate_stripped = candidate_base.rstrip("\"'`.,!?;:()[]{}<>")
+                if candidate_stripped and candidate_stripped.casefold() != candidate_base.casefold():
+                    candidates_to_try.append(candidate_stripped)
 
-                user_id = await self._resolve_user_id_for_generated_at_mention(guild, candidate)
-                if not user_id:
-                    continue
+                for candidate in candidates_to_try:
+                    after_idx = i + 1 + len(candidate)
+                    if after_idx < len(content) and not self._is_mention_boundary_char(content[after_idx]):
+                        continue
 
-                out.append(f"<@{user_id}>")
-                i = after_idx
-                replaced = True
-                break
+                    user_id = await self._resolve_user_id_for_generated_at_mention(guild, candidate)
+                    if not user_id:
+                        continue
+
+                    out.append(f"<@{user_id}>")
+                    i = after_idx
+                    replaced = True
+                    break
+
+                if replaced:
+                    break
 
             if not replaced:
                 out.append(ch)
