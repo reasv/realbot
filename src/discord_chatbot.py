@@ -1,6 +1,7 @@
 import re
 import random
 import datetime
+import time
 from typing import Any, List
 import html
 import os
@@ -28,6 +29,9 @@ class Bot(discord.Client):
     pendingMessages: dict[int, List[dict[str, Any]]] = {}
 
     randomChats: dict[int, RandomChat] = {}
+
+    # guild_id -> (timestamp, display_name_index, username_index)
+    mentionIndexCache: dict[int, tuple[float, dict[str, int], dict[str, int]]] = {}
 
     async def on_ready(self):
         print(f'Logged on as {self.user}!')
@@ -215,6 +219,151 @@ class Bot(discord.Client):
             result = result.replace(match.group(0), f":{match.group(1)}:")
 
         return result
+
+    def _is_mention_boundary_char(self, ch: str) -> bool:
+        return ch.isspace() or ch in "\"'`.,!?;:()[]{}<>"
+
+    def _get_mention_indexes_for_guild(self, guild: Guild) -> tuple[dict[str, int], dict[str, int]]:
+        now = time.time()
+        cached = self.mentionIndexCache.get(guild.id)
+        if cached and now - cached[0] < 300:
+            return cached[1], cached[2]
+
+        members = list(getattr(guild, "members", []) or [])
+        display_counts: dict[str, int] = {}
+        username_counts: dict[str, int] = {}
+        for member in members:
+            display = getattr(member, "display_name", None)
+            if isinstance(display, str) and display:
+                key = display.casefold()
+                display_counts[key] = display_counts.get(key, 0) + 1
+            username = getattr(member, "name", None)
+            if isinstance(username, str) and username:
+                key = username.casefold()
+                username_counts[key] = username_counts.get(key, 0) + 1
+
+        display_index: dict[str, int] = {}
+        username_index: dict[str, int] = {}
+        for member in members:
+            display = getattr(member, "display_name", None)
+            if isinstance(display, str) and display:
+                key = display.casefold()
+                if display_counts.get(key) == 1:
+                    display_index[key] = member.id
+            username = getattr(member, "name", None)
+            if isinstance(username, str) and username:
+                key = username.casefold()
+                if username_counts.get(key) == 1:
+                    username_index[key] = member.id
+
+        self.mentionIndexCache[guild.id] = (now, display_index, username_index)
+        return display_index, username_index
+
+    async def _resolve_user_id_for_generated_at_mention(self, guild: Guild, name: str) -> int | None:
+        name = name.strip()
+        if not name:
+            return None
+        if name.casefold() in {"everyone", "here"}:
+            return None
+
+        display_index, username_index = self._get_mention_indexes_for_guild(guild)
+        key = name.casefold()
+        user_id = display_index.get(key)
+        if user_id:
+            return user_id
+
+        user_id = username_index.get(key)
+        if user_id:
+            return user_id
+
+        query_members = getattr(guild, "query_members", None)
+        if not callable(query_members):
+            return None
+
+        try:
+            results = await query_members(name, limit=10) # type: ignore
+        except Exception:
+            return None
+
+        exact_display = [m for m in results if getattr(m, "display_name", "").casefold() == key]
+        if len(exact_display) == 1:
+            return exact_display[0].id
+
+        exact_username = [m for m in results if getattr(m, "name", "").casefold() == key]
+        if len(exact_username) == 1:
+            return exact_username[0].id
+
+        return None
+
+    async def resolve_generated_at_mentions(self, content: str, guild: Guild | None) -> str:
+        if not guild or "@" not in content:
+            return content
+
+        out: list[str] = []
+        i = 0
+        while i < len(content):
+            ch = content[i]
+            if ch != "@":
+                out.append(ch)
+                i += 1
+                continue
+
+            # Skip real Discord mentions like <@123> / <@!123>
+            if i > 0 and content[i - 1] == "<":
+                out.append(ch)
+                i += 1
+                continue
+
+            if i > 0 and not self._is_mention_boundary_char(content[i - 1]):
+                out.append(ch)
+                i += 1
+                continue
+
+            if i + 1 >= len(content) or content[i + 1].isspace():
+                out.append(ch)
+                i += 1
+                continue
+
+            tail = content[i + 1 :]
+            stop_match = re.match(r"^[^\r\n,!.?:;]+", tail)
+            raw_segment = (stop_match.group(0) if stop_match else tail).strip()
+            if not raw_segment:
+                out.append(ch)
+                i += 1
+                continue
+
+            # Limit how far we try to interpret a name if no punctuation ends it.
+            words = raw_segment.split()
+            if len(words) > 4:
+                words = words[:4]
+
+            replaced = False
+            for k in range(len(words), 0, -1):
+                candidate = " ".join(words[:k]).rstrip("\"'`.,!?;:()[]{}<>")
+                if not candidate:
+                    continue
+
+                if not tail[: len(candidate)].casefold() == candidate.casefold():
+                    continue
+
+                after_idx = i + 1 + len(candidate)
+                if after_idx < len(content) and not self._is_mention_boundary_char(content[after_idx]):
+                    continue
+
+                user_id = await self._resolve_user_id_for_generated_at_mention(guild, candidate)
+                if not user_id:
+                    continue
+
+                out.append(f"<@{user_id}>")
+                i = after_idx
+                replaced = True
+                break
+
+            if not replaced:
+                out.append(ch)
+                i += 1
+
+        return "".join(out)
     
     def addToQueue(self, channelID: int, message: dict[str, Any]):
         extra = ""
@@ -250,7 +399,13 @@ class Bot(discord.Client):
                         response = None
 
                 if response and len(response) > 0:
-                    await channel.send(clean_response(response))
+                    cleaned = clean_response(response)
+                    guild = getattr(channel, "guild", None)
+                    resolved = await self.resolve_generated_at_mentions(
+                        cleaned,
+                        guild if isinstance(guild, Guild) else None,
+                    )
+                    await channel.send(resolved)
                 else:
                     print("No response")
                     
