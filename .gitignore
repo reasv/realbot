@@ -1,6 +1,7 @@
 __pycache__
 history/*.json
 history/*/*.json
+history/images
 .env
 user.config.toml
 characters/*

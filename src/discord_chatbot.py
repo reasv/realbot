@@ -1,14 +1,20 @@
 import re
 import random
 import datetime
-from typing import List
+from typing import Any, List
 import html
+import os
 from dataclasses import dataclass
 
 import asyncio
 import discord
 from discord import Guild, Member, Message
 
+from .chat_image_utils import (
+    build_remote_image_record,
+    download_image_to_history,
+    is_supported_image_mime,
+)
 from .openai_inference import chat_inference
 from .utils import get_config, dequote
 
@@ -19,7 +25,7 @@ class RandomChat:
     lastMessage: Message
 
 class Bot(discord.Client):
-    pendingMessages: dict[int, List[dict[str, str]]] = {}
+    pendingMessages: dict[int, List[dict[str, Any]]] = {}
 
     randomChats: dict[int, RandomChat] = {}
 
@@ -124,7 +130,56 @@ class Bot(discord.Client):
             username = str(message.author)
             content = await self.cleanContent(message.content, None)
 
-        return {"user": username, "message": content}
+        processed: dict[str, Any] = {"user": username, "message": content}
+        images = await self.extract_images(message)
+        if images:
+            processed["images"] = images
+        return processed
+
+    async def extract_images(self, message: Message) -> List[dict[str, Any]]:
+        """
+        Gather all image attachments or preview images for the provided message.
+        Downloads attachments to history/images for replayable context.
+        """
+        images: List[dict[str, Any]] = []
+        channel_id = message.channel.id
+
+        for attachment in getattr(message, "attachments", []):
+            if not is_supported_image_mime(attachment.content_type, attachment.filename):
+                continue
+            record: dict[str, Any] = {
+                "source": "discord_attachment",
+                "url": attachment.url,
+                "filename": attachment.filename,
+            }
+            try:
+                local_path = await download_image_to_history(channel_id, attachment.url, attachment.filename)
+                record["local_path"] = os.path.relpath(local_path).replace("\\", "/")
+            except Exception as e:
+                print(f"Failed to cache attachment {attachment.filename}: {e}")
+            images.append(record)
+
+        for embed in getattr(message, "embeds", []):
+            urls = []
+            image_obj = getattr(embed, "image", None)
+            if image_obj and image_obj.url:
+                urls.append(image_obj.url)
+            thumbnail = getattr(embed, "thumbnail", None)
+            if thumbnail and thumbnail.url:
+                urls.append(thumbnail.url)
+            if embed.type == "image" and embed.url:
+                urls.append(embed.url)
+            for url in urls:
+                if not url:
+                    continue
+                record = build_remote_image_record(
+                    url,
+                    source="discord_embed",
+                    description=getattr(embed, "title", None) or getattr(embed, "description", None),
+                )
+                images.append(record)
+
+        return images
 
     async def getName(self, id: int, guild: Guild) -> str | None:
         assert self.user is not None, "User is None"
@@ -161,8 +216,11 @@ class Bot(discord.Client):
 
         return result
     
-    def addToQueue(self, channelID: int, message: dict[str, str]):
-        print(f"[{channelID}] {message['user']}: {message['message']}")
+    def addToQueue(self, channelID: int, message: dict[str, Any]):
+        extra = ""
+        if message.get("images"):
+            extra = f" [{len(message['images'])} image(s)]"
+        print(f"[{channelID}] {message['user']}: {message['message']}{extra}")
         queue = self.pendingMessages.get(channelID, [])
         queue.append(message)
         self.pendingMessages[channelID] = queue
@@ -183,7 +241,7 @@ class Bot(discord.Client):
                 continue
                 
             # Create coroutine but don't await it yet
-            async def process_channel(channel: discord.abc.Messageable, channelID: int, messages: List[dict[str, str]]):
+            async def process_channel(channel: discord.abc.Messageable, channelID: int, messages: List[dict[str, Any]]):
                 async with channel.typing():
                     try:
                         response = await chat_inference(channelID, messages)

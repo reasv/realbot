@@ -3,7 +3,7 @@ import os
 import random
 import datetime
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -11,6 +11,7 @@ import irc.client
 import irc.client_aio
 import irc.connection
 
+from .chat_image_utils import build_remote_image_record
 from .openai_inference import chat_inference
 from .utils import get_config, dequote
 
@@ -24,6 +25,9 @@ class RandomChat:
     lastMessage: dict  # e.g. {"nick": str, "content": str}
 
 class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
+    IMAGE_URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
+    IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+
     def __init__(self, nickname: str, channels: List[str], use_ssl: bool = True):
         super().__init__()
         self.nickname = nickname
@@ -223,7 +227,15 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         """
         user = message["nick"]
         content = self.clean_content(message["content"])
-        return {"user": user, "message": content}
+        raw_content = message["content"]
+        image_urls = self.extract_image_urls(raw_content)
+        content = self.clean_content(raw_content)
+        processed: dict = {"user": user, "message": content}
+        if image_urls:
+            processed["images"] = [
+                build_remote_image_record(url, "irc_link") for url in image_urls
+            ]
+        return processed
 
     def clean_content(self, content: str) -> str:
         """
@@ -233,11 +245,26 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         content = self.mention_re.sub("{{char}}", content)
         return content.strip()
 
+    def extract_image_urls(self, content: str) -> List[str]:
+        urls: List[str] = []
+        for match in self.IMAGE_URL_RE.findall(content or ""):
+            url = match.rstrip(").,>")
+            if self.is_image_url(url):
+                urls.append(url)
+        return urls
+
+    def is_image_url(self, url: str) -> bool:
+        lower = url.lower().split("?")[0]
+        return any(lower.endswith(ext) for ext in self.IMAGE_EXTENSIONS)
+
     def add_to_queue(self, channel: str, msg: dict):
         """
         Store message in the channel's queue to be handled by the background loop.
         """
-        print(f"[{channel}] {msg['user']}: {msg['message']}")
+        extra = ""
+        if msg.get("images"):
+            extra = f" [{len(msg['images'])} image(s)]"
+        print(f"[{channel}] {msg['user']}: {msg['message']}{extra}")
         self.pendingMessages.setdefault(channel, []).append(msg)
 
     async def _background_loop(self):
@@ -264,7 +291,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
 
             # Clear out the queue
             self.pendingMessages[channel] = []
-            async def process_channel(channel: str, pending: List[dict[str, str]]):
+            async def process_channel(channel: str, pending: List[dict[str, Any]]):
                 try:
                     # Await your async inference call
                     response = await chat_inference(channel, pending)

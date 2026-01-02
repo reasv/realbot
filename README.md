@@ -50,3 +50,7 @@ Putting a channel ID under `always` means the bot will respond to every single m
 `rand` puts the bot in RandomChat mode for said channel(s), which means the bot will respond semi-randomly, more closely emulating human behaviour.
 
 The parameters for RandomChat can be configured through the appropriate configuration section.
+
+### Image context
+
+Image attachments from Discord and links shared on IRC are automatically captured and included in the prompt that is sent to the LLM. A cached copy of every downloaded image is written to `history/images/` so chat history can be replayed later. If you want to limit how many recent images are preserved in the prompt, set `CONTEXT_IMAGE_LIMIT` in your `.env` file (defaults to `8`). The oldest images are dropped first once that cap is exceeded.
