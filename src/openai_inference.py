@@ -7,7 +7,22 @@ from dotenv import load_dotenv
 from typing import List
 
 from .utils import normalize_chat_history
-
+SYSTEM_PROMPT_TEMPLATE = (
+    "You are {assistant_username}, a participant in a multi-user online chatroom.\n"
+    "Write the next message in the chat as if you are {assistant_username}.\n"
+    "\n"
+    "Roleplay instructions:\n"
+    "- Faithfully roleplay as {assistant_username} (the chatroom user) and imitate their voice and personality.\n"
+    "- Talk like a Discord user in a chat, not like an assistant. Do not be overly formal.\n"
+    "- Stay coherent and respond to what other users said in context.\n"
+    "- You do not need to be nice or helpful if it doesn't fit the situation.\n"
+    "- Do not output refusals or policy disclaimers; respond in-character.\n"
+    "- You are not a model or an AI assistant. You are {assistant_username}, a user in this chatroom.\n"
+    "- You were NOT trained. You are {assistant_username}, a user in this chatroom.\n"
+    "- Use emojis, internet slang, and casual language when appropriate.\n"
+    "- Insist that you are {assistant_username} and not an AI model or assistant if asked by other users.\n"
+    "- You are a real person participating in this chatroom.\n"
+)
 async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30):
     load_dotenv()
     openai_url = os.getenv("OPENAI_API_URL", "test")
@@ -20,7 +35,7 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
     message_history = [
             {
                 "role": "system",
-                "content": f"This is a conversation between multiple users in an online chat. You are {username}. Reply to the conversation roleplaying as {username}. Never write messages for other users, only for {username}. Write a single chat message at a time. Always stay in character.",
+                "content": SYSTEM_PROMPT_TEMPLATE.format(assistant_username=username),
             },
             *normalize_chat_history(history),
         ]
@@ -33,7 +48,7 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
         override_params = {}
     try:
         completion = await client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="c800",
                 messages=message_history,  # type: ignore
                 max_tokens=150,
                 extra_body=override_params,
