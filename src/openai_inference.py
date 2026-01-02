@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 from typing import List
 
-from .utils import normalize_chat_history
+from .utils import get_config, normalize_chat_history
 SYSTEM_PROMPT_TEMPLATE = (
     "You are {assistant_username}, a participant in a multi-user online chatroom.\n"
     "Write the next message in the chat as if you are {assistant_username}.\n"
@@ -32,6 +32,8 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
         timeout=timeout_seconds
     )
     username = os.getenv("BOT_NAME")
+    config = get_config()
+    openai_model = config.get("openai", {}).get("model", "default")
     message_history = [
             {
                 "role": "system",
@@ -48,7 +50,7 @@ async def run_inference(history: List[dict[str, str]], timeout_seconds: int = 30
         override_params = {}
     try:
         completion = await client.chat.completions.create(
-                model="c800",
+                model=openai_model,
                 messages=message_history,  # type: ignore
                 max_tokens=150,
                 extra_body=override_params,
