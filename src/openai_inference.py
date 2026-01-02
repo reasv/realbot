@@ -26,15 +26,18 @@ SYSTEM_PROMPT_TEMPLATE = (
 )
 async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30):
     load_dotenv()
-    openai_url = os.getenv("OPENAI_API_URL", "test")
+    openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
+    config = get_config()
+    max_tokens = config.get("openai", {}).get("max_tokens", 150)
+    openai_url = config.get("openai", {}).get("api_url", openai_url)
     client = openai.AsyncOpenAI(
         base_url=openai_url,
         api_key=os.getenv("LLM_API_KEY"),
         timeout=timeout_seconds
     )
     username = os.getenv("BOT_NAME")
-    config = get_config()
     openai_model = config.get("openai", {}).get("model", "default")
+    
     print(f"Using model: {openai_model}")
     message_history = [
             {
@@ -54,7 +57,7 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
         completion = await client.chat.completions.create(
                 model=openai_model,
                 messages=message_history,  # type: ignore
-                max_tokens=150,
+                max_tokens=max_tokens,
                 extra_body=override_params,
             )
         return {
