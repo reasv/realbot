@@ -102,6 +102,10 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
         return None
         
     reply = result["message"]
+    # Strip username: prefix if present
+    if reply:
+        while reply.startswith(f"{username}: "):
+            reply = reply[len(f"{username}: "):]
     history['messages'].append({
         'user': "{{char}}",
         'message': reply
@@ -158,7 +162,10 @@ def build_openai_message(message: Dict[str, Any], username: str) -> Dict[str, An
     msg_content = msg_content.replace("{{char}}", username)
     role = "assistant" if msg_user == "{{char}}" else "user"
     if role == "assistant":
-        text_prefix = msg_content
+        # strip username prefix if present
+        while msg_content.startswith(f"{username}: "):
+            msg_content = msg_content[len(f"{username}: "):]
+        text_prefix = f"{username}: {msg_content}"
     else:
         text_prefix = f"{msg_user}: {msg_content}"
 
