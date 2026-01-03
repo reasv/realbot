@@ -12,3 +12,12 @@ min_downtime_minutes = 5
 max_downtime_minutes = 20
 respond_to_mentions = true
 ctx_len = 30
+
+[openai]
+max_tokens = 150
+ctx_message_limit = 4
+ctx_image_limit = 2
+# If stopping_strings_limit != -1, assistant messages are truncated after the
+# (stopping_strings_limit + 1)th "run" of one or more consecutive stopping strings.
+stopping_strings = ["\n"]
+stopping_strings_limit = -1

@@ -51,6 +51,13 @@ Putting a channel ID under `always` means the bot will respond to every single m
 
 The parameters for RandomChat can be configured through the appropriate configuration section.
 
+### OpenAI output truncation
+
+You can optionally truncate assistant messages based on configurable "stopping strings" from the `openai` section in `user.config.toml`:
+
+- `openai.stopping_strings` (default `["\n"]`)
+- `openai.stopping_strings_limit` (default `-1`, disabled). If set to `N`, the bot truncates after the `(N + 1)`th run of one-or-more consecutive stopping strings (runs are counted globally across all stopping strings). Whitespace-only stopping strings are stripped from the end after truncation.
+
 ### Image context
 
 Image attachments from Discord and links shared on IRC are automatically captured and included in the prompt that is sent to the LLM. A cached copy of every downloaded image is written to `history/images/` so chat history can be replayed later. If you want to limit how many recent images are preserved in the prompt, set `CONTEXT_IMAGE_LIMIT` in your `.env` file (defaults to `8`). The oldest images are dropped first once that cap is exceeded.

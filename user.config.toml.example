@@ -2,3 +2,9 @@
 always = []
 mentions = []
 rand = []
+
+[openai]
+# If stopping_strings_limit != -1, assistant messages are truncated after the
+# (stopping_strings_limit + 1)th "run" of one or more consecutive stopping strings.
+stopping_strings = ["\n"]
+stopping_strings_limit = -1
