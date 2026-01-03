@@ -89,8 +89,9 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
     
     history['messages'].extend(messages)
     save_history()
-    context_msg_limit = int(os.getenv("CONTEXT_MESSAGE_LIMIT", 128))
-    context_image_limit = int(os.getenv("CONTEXT_IMAGE_LIMIT", 8))
+    config = get_config()
+    context_msg_limit = config.get("openai", {}).get("ctx_message_limit", 4)
+    context_image_limit = config.get("openai", {}).get("ctx_image_limit", 2)
     recent_messages = [copy.deepcopy(m) for m in history['messages'][-context_msg_limit:]]
     recent_messages = enforce_image_limit(recent_messages, context_image_limit)
 
