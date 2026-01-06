@@ -518,7 +518,6 @@ class Bot(discord.Client):
         await asyncio.gather(*tasks)
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        print(f"Reaction added in {payload.channel_id} by {payload.user_id}: {payload.emoji}")
         assert self.user is not None, "User is None"
         if payload.user_id == self.user.id:
             return
