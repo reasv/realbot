@@ -5,6 +5,7 @@ import time
 from typing import Any, List
 import html
 import os
+import json
 from dataclasses import dataclass
 
 import asyncio
@@ -389,6 +390,96 @@ class Bot(discord.Client):
                 i += 1
 
         return "".join(out)
+
+    def _control_reactions_path(self, channel_id: int) -> str:
+        return os.path.join("history", "control-reactions", f"{channel_id}.json")
+
+    def _load_control_reactions(self, channel_id: int) -> list[dict[str, str]]:
+        path = self._control_reactions_path(channel_id)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("reactions"), list):
+                out: list[dict[str, str]] = []
+                for item in data["reactions"]:
+                    if not isinstance(item, dict):
+                        continue
+                    message_id = item.get("messageId")
+                    emoji = item.get("emoji")
+                    if not isinstance(message_id, str) or not message_id:
+                        continue
+                    if not isinstance(emoji, str) or not emoji:
+                        continue
+                    out.append({"messageId": message_id, "emoji": emoji})
+                return out
+        except Exception:
+            pass
+        return []
+
+    def _save_control_reactions(self, channel_id: int, reactions: list[dict[str, str]]) -> None:
+        path = self._control_reactions_path(channel_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"reactions": reactions}, f, indent=2)
+
+    def _record_control_reactions(self, channel_id: int, message_id: int, emojis: list[str]) -> None:
+        if not emojis:
+            return
+        existing = self._load_control_reactions(channel_id)
+        existing_set = {(r.get("messageId"), r.get("emoji")) for r in existing}
+        message_id_str = str(message_id)
+        for emoji in emojis:
+            emoji_str = str(emoji)
+            key = (message_id_str, emoji_str)
+            if key in existing_set:
+                continue
+            existing.append({"messageId": message_id_str, "emoji": emoji_str})
+            existing_set.add(key)
+        self._save_control_reactions(channel_id, existing)
+
+    async def _cleanup_recorded_control_reactions(
+        self,
+        channel: discord.abc.Messageable,
+        channel_id: int,
+    ) -> None:
+        """
+        Removes any reactions previously recorded as added by the bot in this channel,
+        and clears those records from disk.
+        """
+        assert self.user is not None, "User is None"
+
+        records = self._load_control_reactions(channel_id)
+        if not records:
+            return
+
+        fetch_message = getattr(channel, "fetch_message", None)
+        if not callable(fetch_message):
+            return
+
+        by_message: dict[str, list[str]] = {}
+        for rec in records:
+            by_message.setdefault(rec["messageId"], []).append(rec["emoji"])
+
+        remaining: list[dict[str, str]] = []
+        for message_id_str, emojis in by_message.items():
+            try:
+                message_id = int(message_id_str)
+            except Exception:
+                continue
+
+            try:
+                msg: Message = await channel.fetch_message(message_id)  # type: ignore
+            except Exception:
+                continue
+
+            for emoji in emojis:
+                try:
+                    await msg.remove_reaction(emoji, self.user)
+                except Exception as e:
+                    print(f"[{channel_id}] Failed to remove recorded reaction {emoji} from {message_id}: {e}")
+                    remaining.append({"messageId": message_id_str, "emoji": emoji})
+
+        self._save_control_reactions(channel_id, remaining)
     
     def addToQueue(self, channelID: int, message: dict[str, Any]):
         extra = ""
@@ -509,6 +600,26 @@ class Bot(discord.Client):
                             finalize_last_assistant_message_id(channelID, str(sent.id))
                     except Exception as e:
                         print(f"[{channelID}] Failed to store assistant messageId: {e}")
+
+                    swipes_cfg = get_config().get("swipes", {}) or {}
+                    try:
+                        await self._cleanup_recorded_control_reactions(channel, channelID)
+                    except Exception as e:
+                        print(f"[{channelID}] Swipe reaction cleanup failed: {e}")
+
+                    if swipes_cfg.get("auto_react_controls", False):
+                        added: list[str] = []
+                        try:
+                            regen_emoji = str(swipes_cfg.get("regen_emoji", "🔄"))
+                            await sent.add_reaction(regen_emoji)
+                            added.append(regen_emoji)
+                        except Exception as e:
+                            print(f"[{channelID}] Failed to auto-react swipe controls: {e}")
+
+                        try:
+                            self._record_control_reactions(channelID, sent.id, added)
+                        except Exception as e:
+                            print(f"[{channelID}] Failed to record control reactions: {e}")
                 else:
                     print("No response")
                     
