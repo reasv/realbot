@@ -21,3 +21,9 @@ ctx_image_limit = 2
 # (stopping_strings_limit + 1)th "run" of one or more consecutive stopping strings.
 stopping_strings = ["\n"]
 stopping_strings_limit = -1
+
+[swipes]
+enabled = false
+regen_emoji = "🔄"
+prev_emoji = "◀️"
+next_emoji = "▶️"

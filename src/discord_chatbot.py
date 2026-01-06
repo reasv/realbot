@@ -16,7 +16,14 @@ from .chat_image_utils import (
     download_image_to_history,
     is_supported_image_mime,
 )
-from .openai_inference import chat_inference
+from .openai_inference import (
+    chat_inference,
+    finalize_assistant_message_id,
+    finalize_last_assistant_message_id,
+    swipe_next,
+    swipe_prev,
+    swipe_regenerate,
+)
 from .utils import get_config, dequote
 
 @dataclass
@@ -27,6 +34,7 @@ class RandomChat:
 
 class Bot(discord.Client):
     pendingMessages: dict[int, List[dict[str, Any]]] = {}
+    pendingSwipes: dict[int, list[tuple[int, str]]] = {}
 
     randomChats: dict[int, RandomChat] = {}
 
@@ -135,6 +143,7 @@ class Bot(discord.Client):
             content = await self.cleanContent(message.content, None)
 
         processed: dict[str, Any] = {"user": username, "message": content}
+        processed["messageId"] = str(message.id)
         images = await self.extract_images(message)
         if images:
             processed["images"] = images
@@ -391,28 +400,99 @@ class Bot(discord.Client):
         self.pendingMessages[channelID] = queue
     
     async def process_messages(self):
-        channelIDs = list(self.pendingMessages.keys())
+        channelIDs = list(set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys()))
         tasks = []
         
         for channelID in channelIDs:
             pending = self.pendingMessages.get(channelID, [])
-            if len(pending) == 0:
+            swipe_jobs = self.pendingSwipes.get(channelID, [])
+            if len(pending) == 0 and len(swipe_jobs) == 0:
                 continue
                 
             self.pendingMessages[channelID] = []
+            self.pendingSwipes[channelID] = []
             channel = self.get_channel(channelID)
             if not isinstance(channel, discord.abc.Messageable):
                 print(f"Channel {channelID} is not a Messageable")
                 continue
                 
             # Create coroutine but don't await it yet
-            async def process_channel(channel: discord.abc.Messageable, channelID: int, messages: List[dict[str, Any]]):
+            async def process_channel(
+                channel: discord.abc.Messageable,
+                channelID: int,
+                messages: List[dict[str, Any]],
+                swipe_jobs: list[tuple[int, str]],
+            ):
                 async with channel.typing():
+                    if swipe_jobs:
+                        last_by_message: dict[int, tuple[int, str]] = {}
+                        for i, (message_id, action) in enumerate(swipe_jobs):
+                            last_by_message[message_id] = (i, action)
+
+                        jobs_to_run = [
+                            (message_id, action)
+                            for message_id, (i, action) in sorted(
+                                last_by_message.items(), key=lambda kv: kv[1][0]
+                            )
+                        ]
+
+                        fetch_message = getattr(channel, "fetch_message", None)
+                        if callable(fetch_message):
+                            for message_id, action in jobs_to_run:
+                                try:
+                                    target_message: Message = await channel.fetch_message(message_id) # type: ignore
+                                except Exception as e:
+                                    print(f"[{channelID}] Swipe fetch_message failed for {message_id}: {e}")
+                                    continue
+
+                                assert self.user is not None, "User is None"
+                                if target_message.author.id != self.user.id:
+                                    continue
+
+                                new_text: str | None = None
+                                try:
+                                    if action == "regen":
+                                        new_text = await swipe_regenerate(channelID, str(message_id))
+                                    elif action == "prev":
+                                        new_text = swipe_prev(channelID, str(message_id))
+                                    elif action == "next":
+                                        new_text = swipe_next(channelID, str(message_id))
+                                except Exception as e:
+                                    print(f"[{channelID}] Swipe action failed for {message_id}: {e}")
+                                    continue
+
+                                if not new_text:
+                                    continue
+
+                                cleaned = clean_response(new_text)
+                                guild = getattr(target_message, "guild", None)
+                                resolved = await self.resolve_generated_at_mentions(
+                                    cleaned,
+                                    guild if isinstance(guild, Guild) else None,
+                                )
+                                try:
+                                    await target_message.edit(content=resolved)
+                                except Exception as e:
+                                    print(f"[{channelID}] Swipe edit failed for {message_id}: {e}")
+                        else:
+                            print(f"[{channelID}] Channel does not support fetch_message; skipping swipe jobs")
+
+                    if len(messages) == 0:
+                        # Nothing more to do
+                        return
                     try:
-                        response = await chat_inference(channelID, messages)
+                        inference_result = await chat_inference(channelID, messages)
                     except Exception as e:
                         print(e)
-                        response = None
+                        inference_result = None
+
+                response: str | None = None
+                pending_message_id: str | None = None
+                if isinstance(inference_result, tuple) and len(inference_result) == 2:
+                    response = inference_result[0]
+                    pending_message_id = inference_result[1]
+                elif isinstance(inference_result, str):
+                    response = inference_result
 
                 if response and len(response) > 0:
                     cleaned = clean_response(response)
@@ -421,14 +501,50 @@ class Bot(discord.Client):
                         cleaned,
                         guild if isinstance(guild, Guild) else None,
                     )
-                    await channel.send(resolved)
+                    sent = await channel.send(resolved)
+                    try:
+                        if pending_message_id:
+                            finalize_assistant_message_id(channelID, pending_message_id, str(sent.id))
+                        else:
+                            finalize_last_assistant_message_id(channelID, str(sent.id))
+                    except Exception as e:
+                        print(f"[{channelID}] Failed to store assistant messageId: {e}")
                 else:
                     print("No response")
                     
-            tasks.append(process_channel(channel, channelID, pending))
+            tasks.append(process_channel(channel, channelID, pending, swipe_jobs))
         
         # Run all tasks concurrently
         await asyncio.gather(*tasks)
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        print(f"Reaction added in {payload.channel_id} by {payload.user_id}: {payload.emoji}")
+        assert self.user is not None, "User is None"
+        if payload.user_id == self.user.id:
+            return
+
+        config = get_config().get("swipes", {}) or {}
+        if not config.get("enabled", False):
+            return
+
+        emoji_text = str(payload.emoji)
+        regen_emoji = config.get("regen_emoji", "🔄")
+        prev_emoji = config.get("prev_emoji", "◀️")
+        next_emoji = config.get("next_emoji", "▶️")
+
+        action: str | None = None
+        if emoji_text == regen_emoji:
+            action = "regen"
+        elif emoji_text == prev_emoji:
+            action = "prev"
+        elif emoji_text == next_emoji:
+            action = "next"
+        else:
+            return
+        print(f"Swipe action detected: {action}")
+        queue = self.pendingSwipes.get(payload.channel_id, [])
+        queue.append((payload.message_id, action))
+        self.pendingSwipes[payload.channel_id] = queue
     
     async def inference_loop_task(self):
         await self.wait_until_ready()

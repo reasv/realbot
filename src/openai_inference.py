@@ -1,6 +1,7 @@
 import copy
 import json
 from typing import Any, Dict, List, Iterable
+import uuid
 import openai
 import asyncio
 import os
@@ -143,6 +144,33 @@ def truncate_message_by_stopping_strings(
     return message
 
 
+def _history_file_for_channel(channelID: int | str) -> str:
+    return f"history/{channelID}.json"
+
+
+def load_channel_history(channelID: int | str) -> dict[str, Any]:
+    history_file = _history_file_for_channel(channelID)
+    try:
+        with open(history_file, "r") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict) and isinstance(loaded.get("messages"), list):
+            return loaded
+    except Exception:
+        pass
+    return {"messages": []}
+
+
+def save_channel_history(channelID: int | str, history: dict[str, Any]) -> None:
+    history_file = _history_file_for_channel(channelID)
+    os.makedirs(os.path.dirname(history_file), exist_ok=True)
+    with open(history_file, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def _new_pending_message_id() -> str:
+    return f"pending:{uuid.uuid4()}"
+
+
 async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30):
     load_dotenv()
     openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
@@ -189,29 +217,28 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
         print(f"Error during inference: {str(e)}")
         return None
 
-async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], timeout_seconds: int = 60):
-    load_dotenv()
-    username = os.getenv("BOT_NAME")
-    assert username is not None, "Error. Please set the BOT_NAME environment variable."
 
-    history_file = f"history/{channelID}.json"
-    try:
-        with open(history_file, "r") as f:
-            history: dict[str, list] = json.load(f)
-    except:
-        history = {'messages': []}
-
-    def save_history():
-        os.makedirs(os.path.dirname(history_file), exist_ok=True)
-        with open(history_file, "w") as f:
-            json.dump(history, f, indent=2)
-    
-    history['messages'].extend(messages)
-    save_history()
+async def _generate_reply_from_stored_messages(
+    stored_messages: List[dict[str, Any]],
+    username: str,
+    timeout_seconds: int,
+) -> str | None:
     config = get_config()
-    context_msg_limit = config.get("openai", {}).get("ctx_message_limit", 4)
-    context_image_limit = config.get("openai", {}).get("ctx_image_limit", 2)
-    recent_messages = [copy.deepcopy(m) for m in history['messages'][-context_msg_limit:]]
+    try:
+        context_msg_limit = int(config.get("openai", {}).get("ctx_message_limit", 4))
+    except Exception:
+        context_msg_limit = 4
+
+    try:
+        context_image_limit = int(config.get("openai", {}).get("ctx_image_limit", 2))
+    except Exception:
+        context_image_limit = 2
+
+    if context_msg_limit <= 0:
+        recent_messages: List[dict[str, Any]] = []
+    else:
+        recent_messages = [copy.deepcopy(m) for m in stored_messages[-context_msg_limit:]]
+
     recent_messages = enforce_image_limit(recent_messages, context_image_limit)
 
     formatted_messages: List[Dict[str, Any]] = []
@@ -219,13 +246,12 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
         formatted = build_openai_message(msg, username)
         if formatted:
             formatted_messages.append(formatted)
-    
+
     result = await run_inference(formatted_messages, timeout_seconds)
     if result is None:
         return None
-        
+
     reply = result["message"]
-    # Strip username: prefix if present
     if reply:
         while reply.startswith(f"{username}: "):
             reply = reply[len(f"{username}: "):]
@@ -236,21 +262,257 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
         openai_cfg.get("stopping_strings", ["\n"]),
         openai_cfg.get("stopping_strings_limit", -1),
     )
-    history['messages'].append({
-        'user': "{{char}}",
-        'message': reply
-    })
+    return reply
 
-    save_history()
+
+async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], timeout_seconds: int = 60):
+    load_dotenv()
+    username = os.getenv("BOT_NAME")
+    assert username is not None, "Error. Please set the BOT_NAME environment variable."
+
+    history = load_channel_history(channelID)
+    
+    history['messages'].extend(messages)
+    save_channel_history(channelID, history)
+
+    reply = await _generate_reply_from_stored_messages(history["messages"], username, timeout_seconds)
+    if reply is None:
+        return None
+
+    pending_message_id: str | None = None
+    if isinstance(channelID, int):
+        pending_message_id = _new_pending_message_id()
+
+    assistant_message: dict[str, Any] = {"user": "{{char}}", "message": reply}
+    if isinstance(channelID, int):
+        assistant_message["messageId"] = pending_message_id
+    history["messages"].append(assistant_message)
+    save_channel_history(channelID, history)
 
     print(reply)
     # Remove "username: " from the start of the message
     if reply and reply.startswith(f"{username}: "):
         reply = reply[len(f"{username}: "):]
-    return reply
+    return (reply, pending_message_id)
 
 if __name__ == '__main__':
     asyncio.run(chat_inference(1, [{"user": "Carl", "message": "What's your username, {{char}}?"}]))
+
+
+def finalize_assistant_message_id(channelID: int | str, pendingMessageId: str, messageId: str) -> bool:
+    """
+    Update the assistant message with `messageId == pendingMessageId` to have the
+    provided platform message ID. To minimize work, it first checks the latest
+    assistant message, then falls back to a reverse scan.
+    """
+    history = load_channel_history(channelID)
+    messages = history.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    pending_id_str = str(pendingMessageId)
+    real_id_str = str(messageId)
+
+    # Fast path: latest assistant message matches pending id.
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("user") != "{{char}}":
+            continue
+        if msg.get("messageId") == pending_id_str:
+            msg["messageId"] = real_id_str
+            save_channel_history(channelID, history)
+            return True
+        break
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("user") != "{{char}}":
+            continue
+        if msg.get("messageId") == pending_id_str:
+            msg["messageId"] = real_id_str
+            save_channel_history(channelID, history)
+            return True
+
+    return False
+
+
+def finalize_last_assistant_message_id(channelID: int | str, messageId: str) -> bool:
+    """
+    Legacy helper retained for compatibility. Prefer finalize_assistant_message_id.
+    """
+    history = load_channel_history(channelID)
+    messages = history.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    message_id_str = str(messageId)
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("user") != "{{char}}":
+            continue
+        existing = msg.get("messageId")
+        if isinstance(existing, str) and existing.startswith("pending:"):
+            msg["messageId"] = message_id_str
+            save_channel_history(channelID, history)
+            return True
+        return False
+
+    return False
+
+
+def _find_message_index_by_id(history: dict[str, Any], messageId: str) -> int | None:
+    messages = history.get("messages")
+    if not isinstance(messages, list):
+        return None
+
+    message_id_str = str(messageId)
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("messageId") == message_id_str:
+            return i
+    return None
+
+
+def _ensure_swipe_fields(msg: dict[str, Any]) -> None:
+    current = str(msg.get("message", "") or "")
+    swipes = msg.get("swipes")
+    if not isinstance(swipes, list) or not all(isinstance(s, str) for s in swipes):
+        swipes = [current]
+        msg["swipes"] = swipes
+        msg["swipeIndex"] = 0
+        return
+
+    if not swipes:
+        msg["swipes"] = [current]
+        msg["swipeIndex"] = 0
+        return
+
+    idx = msg.get("swipeIndex")
+    if not isinstance(idx, int):
+        idx = -1
+
+    if 0 <= idx < len(swipes) and swipes[idx] == current:
+        return
+
+    try:
+        found = swipes.index(current)
+    except ValueError:
+        swipes.append(current)
+        msg["swipeIndex"] = len(swipes) - 1
+        return
+
+    msg["swipeIndex"] = found
+
+
+async def swipe_regenerate(channelID: int | str, messageId: str, timeout_seconds: int = 60) -> str | None:
+    """
+    Regenerate a prior assistant message (nondestructive).
+    - Initializes swipes/swipeIndex if missing.
+    - Appends a new swipe, updates message + swipeIndex, saves to disk.
+    """
+    load_dotenv()
+    username = os.getenv("BOT_NAME")
+    assert username is not None, "Error. Please set the BOT_NAME environment variable."
+
+    history = load_channel_history(channelID)
+    idx = _find_message_index_by_id(history, messageId)
+    if idx is None:
+        print(f"[swipes] messageId not found in channel {channelID}: {messageId}")
+        return None
+
+    messages = history.get("messages")
+    assert isinstance(messages, list)
+    target = messages[idx]
+    if not isinstance(target, dict) or target.get("user") != "{{char}}":
+        print(f"[swipes] messageId is not an assistant message in channel {channelID}: {messageId}")
+        return None
+
+    _ensure_swipe_fields(target)
+
+    context_messages: List[dict[str, Any]] = []
+    for m in messages[:idx]:
+        if isinstance(m, dict):
+            context_messages.append(m)
+
+    reply = await _generate_reply_from_stored_messages(context_messages, username, timeout_seconds)
+    if reply is None:
+        return None
+
+    target.setdefault("swipes", [])
+    if not isinstance(target.get("swipes"), list):
+        target["swipes"] = []
+    target["swipes"].append(reply)
+    target["swipeIndex"] = len(target["swipes"]) - 1
+    target["message"] = reply
+
+    save_channel_history(channelID, history)
+    return reply
+
+
+def swipe_prev(channelID: int | str, messageId: str) -> str | None:
+    history = load_channel_history(channelID)
+    idx = _find_message_index_by_id(history, messageId)
+    if idx is None:
+        print(f"[swipes] messageId not found in channel {channelID}: {messageId}")
+        return None
+
+    messages = history.get("messages")
+    if not isinstance(messages, list) or not (0 <= idx < len(messages)):
+        return None
+
+    msg = messages[idx]
+    if not isinstance(msg, dict) or msg.get("user") != "{{char}}":
+        return None
+
+    _ensure_swipe_fields(msg)
+    swipes = msg.get("swipes")
+    swipe_index = msg.get("swipeIndex")
+    if not isinstance(swipes, list) or not isinstance(swipe_index, int):
+        return None
+
+    if swipe_index <= 0:
+        return None
+
+    new_index = swipe_index - 1
+    msg["swipeIndex"] = new_index
+    msg["message"] = swipes[new_index]
+    save_channel_history(channelID, history)
+    return msg["message"]
+
+
+def swipe_next(channelID: int | str, messageId: str) -> str | None:
+    history = load_channel_history(channelID)
+    idx = _find_message_index_by_id(history, messageId)
+    if idx is None:
+        print(f"[swipes] messageId not found in channel {channelID}: {messageId}")
+        return None
+
+    messages = history.get("messages")
+    if not isinstance(messages, list) or not (0 <= idx < len(messages)):
+        return None
+
+    msg = messages[idx]
+    if not isinstance(msg, dict) or msg.get("user") != "{{char}}":
+        return None
+
+    _ensure_swipe_fields(msg)
+    swipes = msg.get("swipes")
+    swipe_index = msg.get("swipeIndex")
+    if not isinstance(swipes, list) or not isinstance(swipe_index, int):
+        return None
+
+    if swipe_index >= len(swipes) - 1:
+        return None
+
+    new_index = swipe_index + 1
+    msg["swipeIndex"] = new_index
+    msg["message"] = swipes[new_index]
+    save_channel_history(channelID, history)
+    return msg["message"]
 
 
 def enforce_image_limit(messages: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:

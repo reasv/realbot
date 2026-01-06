@@ -294,10 +294,16 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
             async def process_channel(channel: str, pending: List[dict[str, Any]]):
                 try:
                     # Await your async inference call
-                    response = await chat_inference(channel, pending)
+                    inference_result = await chat_inference(channel, pending)
                 except Exception as e:
                     print(f"[{channel}] chat_inference error: {e}")
-                    response = None
+                    inference_result = None
+
+                response: str | None = None
+                if isinstance(inference_result, tuple) and len(inference_result) == 2:
+                    response = inference_result[0]
+                elif isinstance(inference_result, str):
+                    response = inference_result
                 
                 if response:
                     response = self.clean_response(response)
