@@ -515,6 +515,39 @@ def swipe_next(channelID: int | str, messageId: str) -> str | None:
     return msg["message"]
 
 
+def get_swipe_nav_state(channelID: int | str, messageId: str) -> tuple[bool, bool] | None:
+    """
+    Returns (has_prev, has_next) for the assistant message identified by messageId.
+    If the message has no swipes data, returns (False, False).
+    """
+    history = load_channel_history(channelID)
+    idx = _find_message_index_by_id(history, messageId)
+    if idx is None:
+        return None
+
+    messages = history.get("messages")
+    if not isinstance(messages, list) or not (0 <= idx < len(messages)):
+        return None
+
+    msg = messages[idx]
+    if not isinstance(msg, dict) or msg.get("user") != "{{char}}":
+        return None
+
+    swipes = msg.get("swipes")
+    swipe_index = msg.get("swipeIndex")
+    if not isinstance(swipes, list) or not all(isinstance(s, str) for s in swipes):
+        return (False, False)
+    if not isinstance(swipe_index, int):
+        return (False, False)
+
+    if swipe_index < 0 or swipe_index >= len(swipes):
+        return (False, False)
+
+    has_prev = swipe_index > 0
+    has_next = swipe_index < len(swipes) - 1
+    return (has_prev, has_next)
+
+
 def enforce_image_limit(messages: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     """
     Trim image references across the provided messages so that at most `limit`

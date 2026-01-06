@@ -21,6 +21,7 @@ from .openai_inference import (
     chat_inference,
     finalize_assistant_message_id,
     finalize_last_assistant_message_id,
+    get_swipe_nav_state,
     swipe_next,
     swipe_prev,
     swipe_regenerate,
@@ -422,6 +423,18 @@ class Bot(discord.Client):
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"reactions": reactions}, f, indent=2)
 
+    def _unrecord_control_reaction(self, channel_id: int, message_id: int, emoji: str) -> None:
+        existing = self._load_control_reactions(channel_id)
+        message_id_str = str(message_id)
+        emoji_str = str(emoji)
+        filtered = [
+            r
+            for r in existing
+            if not (r.get("messageId") == message_id_str and r.get("emoji") == emoji_str)
+        ]
+        if len(filtered) != len(existing):
+            self._save_control_reactions(channel_id, filtered)
+
     def _record_control_reactions(self, channel_id: int, message_id: int, emojis: list[str]) -> None:
         if not emojis:
             return
@@ -436,6 +449,35 @@ class Bot(discord.Client):
             existing.append({"messageId": message_id_str, "emoji": emoji_str})
             existing_set.add(key)
         self._save_control_reactions(channel_id, existing)
+
+    async def _set_control_reaction(
+        self,
+        channel_id: int,
+        msg: Message,
+        emoji: str,
+        should_have: bool,
+    ) -> None:
+        assert self.user is not None, "User is None"
+        emoji_str = str(emoji)
+        if not emoji_str:
+            return
+
+        if should_have:
+            try:
+                await msg.add_reaction(emoji_str)
+                self._record_control_reactions(channel_id, msg.id, [emoji_str])
+            except Exception:
+                return
+            return
+
+        try:
+            await msg.remove_reaction(emoji_str, self.user)
+            self._unrecord_control_reaction(channel_id, msg.id, emoji_str)
+        except Exception as e:
+            not_found = getattr(discord, "NotFound", None)
+            if not_found and isinstance(e, not_found):
+                self._unrecord_control_reaction(channel_id, msg.id, emoji_str)
+            return
 
     async def _cleanup_recorded_control_reactions(
         self,
@@ -470,6 +512,8 @@ class Bot(discord.Client):
             try:
                 msg: Message = await channel.fetch_message(message_id)  # type: ignore
             except Exception:
+                for emoji in emojis:
+                    remaining.append({"messageId": message_id_str, "emoji": emoji})
                 continue
 
             for emoji in emojis:
@@ -516,6 +560,10 @@ class Bot(discord.Client):
             ):
                 async with channel.typing():
                     if swipe_jobs:
+                        swipes_cfg = get_config().get("swipes", {}) or {}
+                        prev_emoji = str(swipes_cfg.get("prev_emoji", "◀️"))
+                        next_emoji = str(swipes_cfg.get("next_emoji", "▶️"))
+
                         last_by_message: dict[int, tuple[int, str]] = {}
                         for i, (message_id, action) in enumerate(swipe_jobs):
                             last_by_message[message_id] = (i, action)
@@ -552,19 +600,26 @@ class Bot(discord.Client):
                                     print(f"[{channelID}] Swipe action failed for {message_id}: {e}")
                                     continue
 
-                                if not new_text:
-                                    continue
+                                if new_text:
+                                    cleaned = clean_response(new_text)
+                                    guild = getattr(target_message, "guild", None)
+                                    resolved = await self.resolve_generated_at_mentions(
+                                        cleaned,
+                                        guild if isinstance(guild, Guild) else None,
+                                    )
+                                    try:
+                                        await target_message.edit(content=resolved)
+                                    except Exception as e:
+                                        print(f"[{channelID}] Swipe edit failed for {message_id}: {e}")
 
-                                cleaned = clean_response(new_text)
-                                guild = getattr(target_message, "guild", None)
-                                resolved = await self.resolve_generated_at_mentions(
-                                    cleaned,
-                                    guild if isinstance(guild, Guild) else None,
-                                )
                                 try:
-                                    await target_message.edit(content=resolved)
+                                    nav = get_swipe_nav_state(channelID, str(message_id))
+                                    if nav is not None:
+                                        has_prev, has_next = nav
+                                        await self._set_control_reaction(channelID, target_message, prev_emoji, has_prev)
+                                        await self._set_control_reaction(channelID, target_message, next_emoji, has_next)
                                 except Exception as e:
-                                    print(f"[{channelID}] Swipe edit failed for {message_id}: {e}")
+                                    print(f"[{channelID}] Swipe reaction update failed for {message_id}: {e}")
                         else:
                             print(f"[{channelID}] Channel does not support fetch_message; skipping swipe jobs")
 
