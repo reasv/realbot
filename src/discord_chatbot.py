@@ -533,6 +533,38 @@ class Bot(discord.Client):
         queue = self.pendingMessages.get(channelID, [])
         queue.append(message)
         self.pendingMessages[channelID] = queue
+
+    def _coerce_int_set(self, values: Any) -> set[int]:
+        if not isinstance(values, list):
+            return set()
+        out: set[int] = set()
+        for v in values:
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, int):
+                out.add(v)
+                continue
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    continue
+                try:
+                    out.add(int(s))
+                except Exception:
+                    continue
+        return out
+
+    def _swipe_allowed(self, swipes_cfg: dict[str, Any], user_id: int, channel_id: int) -> bool:
+        user_whitelist = self._coerce_int_set(swipes_cfg.get("user_whitelist"))
+        channel_whitelist = self._coerce_int_set(swipes_cfg.get("channel_whitelist"))
+
+        if not user_whitelist and not channel_whitelist:
+            return True
+        if not user_whitelist:
+            return channel_id in channel_whitelist
+        if not channel_whitelist:
+            return user_id in user_whitelist
+        return (user_id in user_whitelist) or (channel_id in channel_whitelist)
     
     async def process_messages(self):
         channelIDs = list(set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys()))
@@ -663,18 +695,25 @@ class Bot(discord.Client):
                         print(f"[{channelID}] Swipe reaction cleanup failed: {e}")
 
                     if swipes_cfg.get("auto_react_controls", False):
-                        added: list[str] = []
-                        try:
-                            regen_emoji = str(swipes_cfg.get("regen_emoji", "🔄"))
-                            await sent.add_reaction(regen_emoji)
-                            added.append(regen_emoji)
-                        except Exception as e:
-                            print(f"[{channelID}] Failed to auto-react swipe controls: {e}")
+                        auto_react_channel_whitelist = self._coerce_int_set(
+                            swipes_cfg.get("auto_react_channel_whitelist")
+                        )
+                        should_auto_react = (not auto_react_channel_whitelist) or (
+                            channelID in auto_react_channel_whitelist
+                        )
+                        if should_auto_react:
+                            added: list[str] = []
+                            try:
+                                regen_emoji = str(swipes_cfg.get("regen_emoji", "🔄"))
+                                await sent.add_reaction(regen_emoji)
+                                added.append(regen_emoji)
+                            except Exception as e:
+                                print(f"[{channelID}] Failed to auto-react swipe controls: {e}")
 
-                        try:
-                            self._record_control_reactions(channelID, sent.id, added)
-                        except Exception as e:
-                            print(f"[{channelID}] Failed to record control reactions: {e}")
+                            try:
+                                self._record_control_reactions(channelID, sent.id, added)
+                            except Exception as e:
+                                print(f"[{channelID}] Failed to record control reactions: {e}")
                 else:
                     print("No response")
                     
@@ -690,6 +729,9 @@ class Bot(discord.Client):
 
         config = get_config().get("swipes", {}) or {}
         if not config.get("enabled", False):
+            return
+
+        if not self._swipe_allowed(config, payload.user_id, payload.channel_id):
             return
 
         emoji_text = str(payload.emoji)

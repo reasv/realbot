@@ -28,3 +28,6 @@ regen_emoji = "🔄"
 prev_emoji = "◀️"
 next_emoji = "▶️"
 auto_react_controls = false
+user_whitelist = []
+channel_whitelist = []
+auto_react_channel_whitelist = []
