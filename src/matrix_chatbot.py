@@ -788,7 +788,12 @@ class MatrixBot:
         content = evt.content
         room_id = str(evt.room_id)
 
-        # m.image message type -- download via Matrix media API and save locally
+        config = get_config()
+        matrix_cfg = config.get("matrix", {})
+        max_preview_links = int(matrix_cfg.get("max_preview_links", 3))
+        max_images = int(matrix_cfg.get("max_images_per_message", 5))
+
+        # ── 1. m.image attachment ────────────────────────────────────────
         # In E2EE rooms, content.url is None; the media is at content.file
         # (an EncryptedFile with url, key, iv, hashes) and must be decrypted.
         msgtype = getattr(content, "msgtype", None)
@@ -827,15 +832,38 @@ class MatrixBot:
                         exc,
                     )
 
-        # Image URLs in text body -- download locally so they're base64-encoded
-        # for inference rather than relying on the model fetching them.
+        if len(images) >= max_images:
+            return images[:max_images]
+
+        # ── 2. URLs in text body ─────────────────────────────────────────
         body = getattr(content, "body", None) or ""
-        url_re = re.compile(
+        image_url_re = re.compile(
             r"https?://\S+\.(?:png|jpg|jpeg|gif|webp)(?:\?\S*)?",
             re.IGNORECASE,
         )
-        for match in url_re.finditer(body):
-            img_url = match.group(0)
+        general_url_re = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+
+        # Collect all URLs, split into direct-image vs preview candidates
+        all_urls: list[str] = []
+        seen: set[str] = set()
+        for match in general_url_re.finditer(body):
+            url_str = match.group(0).rstrip(".,;:!?")
+            if url_str not in seen:
+                seen.add(url_str)
+                all_urls.append(url_str)
+
+        direct_image_urls: list[str] = []
+        preview_candidates: list[str] = []
+        for url_str in all_urls:
+            if image_url_re.fullmatch(url_str):
+                direct_image_urls.append(url_str)
+            else:
+                preview_candidates.append(url_str)
+
+        # ── 2a. Direct image URLs -- download locally ────────────────────
+        for img_url in direct_image_urls:
+            if len(images) >= max_images:
+                break
             try:
                 local = await download_image_to_history(room_id, img_url)
                 images.append(
@@ -855,7 +883,47 @@ class MatrixBot:
                 # Fall back to remote-only record so inference can try the raw URL
                 images.append(build_remote_image_record(img_url, source="matrix_url"))
 
-        return images
+        if len(images) >= max_images:
+            return images[:max_images]
+
+        # ── 2b. Non-image URLs -- fetch link previews via homeserver ─────
+        # The homeserver fetches og:image (like Discord's embed previews)
+        # and caches it as an mxc:// URL we can download.
+        # Limited to max_preview_links per message to control bandwidth.
+        previews_fetched = 0
+        for page_url in preview_candidates:
+            if len(images) >= max_images:
+                break
+            if previews_fetched >= max_preview_links:
+                break
+            previews_fetched += 1
+            try:
+                preview = await self.client.get_url_preview(page_url)
+                og_image = getattr(preview, "image", None)
+                if og_image and getattr(og_image, "url", None):
+                    mxc_url = og_image.url
+                    data = await self.client.download_media(mxc_url)
+                    filename = "preview.jpg"
+                    local = await download_image_to_history(
+                        room_id, str(mxc_url), filename, data=data
+                    )
+                    images.append(
+                        {
+                            "source": "matrix_preview",
+                            "url": page_url,
+                            "preview_title": getattr(preview, "title", "") or "",
+                            "local_path": local,
+                        }
+                    )
+            except Exception as exc:
+                log.warning(
+                    "[%s] Link preview failed for %s: %s",
+                    room_id,
+                    page_url,
+                    exc,
+                )
+
+        return images[:max_images]
 
     # ── queue management ─────────────────────────────────────────────
 

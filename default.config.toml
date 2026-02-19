@@ -31,3 +31,9 @@ auto_react_controls = false
 user_whitelist = []
 channel_whitelist = []
 auto_react_channel_whitelist = []
+
+[matrix]
+# Max non-image URLs per message to fetch link previews for
+max_preview_links = 3
+# Total images considered per message (attachments + direct URLs + previews)
+max_images_per_message = 5
