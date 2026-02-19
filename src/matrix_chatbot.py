@@ -539,6 +539,21 @@ class MatrixBot:
         except Exception as exc:
             log.warning("Failed to query device keys from server: %s", exc)
 
+        # Cross-sign our device using the recovery key so other clients
+        # see it as verified (not "unverified session").
+        recovery_key = os.environ.get("MATRIX_RECOVERY_KEY", "").strip()
+        if recovery_key:
+            try:
+                await self.crypto_machine.verify_with_recovery_key(recovery_key)
+                log.info("Device cross-signed via recovery key -- verified!")
+            except Exception as exc:
+                log.warning("Cross-signing via recovery key failed: %s", exc)
+        else:
+            log.info(
+                "No MATRIX_RECOVERY_KEY set -- device will appear unverified. "
+                "Set the env var to your recovery key to enable cross-signing."
+            )
+
     # ── event handlers ───────────────────────────────────────────────
 
     async def _on_invite(self, evt: Any) -> None:
