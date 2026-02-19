@@ -32,6 +32,7 @@ from mautrix.client.encryption_manager import DecryptionDispatcher
 from mautrix.client.state_store.memory import MemoryStateStore
 from mautrix.client.syncer import InternalEventType
 from mautrix.crypto import OlmMachine
+from mautrix.crypto.attachments import decrypt_attachment
 from mautrix.crypto.store.asyncpg import PgCryptoStore
 from mautrix.types import (
     EventID,
@@ -788,20 +789,32 @@ class MatrixBot:
         room_id = str(evt.room_id)
 
         # m.image message type -- download via Matrix media API and save locally
+        # In E2EE rooms, content.url is None; the media is at content.file
+        # (an EncryptedFile with url, key, iv, hashes) and must be decrypted.
         msgtype = getattr(content, "msgtype", None)
         if msgtype == MessageType.IMAGE:
             url = getattr(content, "url", None)
+            enc_file = getattr(content, "file", None)
             filename = getattr(content, "body", "image.png") or "image.png"
-            if url:
+            media_url = url or (enc_file.url if enc_file else None)
+            if media_url:
                 try:
-                    data = await self.client.download_media(url)
+                    data = await self.client.download_media(media_url)
+                    # Decrypt if this is an encrypted attachment
+                    if enc_file and not url:
+                        data = decrypt_attachment(
+                            data,
+                            enc_file.key.key,
+                            enc_file.hashes["sha256"],
+                            enc_file.iv,
+                        )
                     local = await download_image_to_history(
-                        room_id, str(url), filename, data=data
+                        room_id, str(media_url), filename, data=data
                     )
                     images.append(
                         {
                             "source": "matrix_image",
-                            "url": str(url),
+                            "url": str(media_url),
                             "filename": filename,
                             "local_path": local,
                         }
@@ -810,7 +823,7 @@ class MatrixBot:
                     log.warning(
                         "[%s] Failed to download m.image %s: %s",
                         room_id,
-                        url,
+                        media_url,
                         exc,
                     )
 
