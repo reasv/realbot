@@ -2,6 +2,7 @@ __pycache__
 history/*.json
 history/*/*.json
 history/matrix_store/*
+history/matrix_session.txt
 history/images
 .env
 user.config.toml
