@@ -15,21 +15,26 @@ from typing import Any, Callable, Iterable, List, Sequence
 from dotenv import load_dotenv
 
 try:
-    from nio import AsyncClient, AsyncClientConfig, MatrixRoom, ReactionEvent, RoomMessageText
+    from nio import (
+        AsyncClient,
+        AsyncClientConfig,
+        MatrixRoom,
+        MegolmEvent,
+        ReactionEvent,
+        RoomMessage,
+        UnknownEncryptedEvent,
+    )
 
     NIO_AVAILABLE = True
 except Exception:
     AsyncClient = None  # type: ignore
     AsyncClientConfig = None  # type: ignore
     MatrixRoom = Any  # type: ignore
+    MegolmEvent = Any  # type: ignore
     ReactionEvent = Any  # type: ignore
-    RoomMessageText = Any  # type: ignore
+    RoomMessage = Any  # type: ignore
+    UnknownEncryptedEvent = Any  # type: ignore
     NIO_AVAILABLE = False
-
-try:
-    from nio.events.room_events import RoomMessageMedia
-except Exception:
-    RoomMessageMedia = RoomMessageText  # type: ignore
 
 from .chat_image_utils import (
     build_remote_image_record,
@@ -338,10 +343,10 @@ class MatrixBot:
         self.roomCache: dict[str, MatrixRoom] = {}
         self.bg_task: asyncio.Task | None = None
 
-        self.client.add_event_callback(self.on_room_message, RoomMessageText)
-        if RoomMessageMedia is not RoomMessageText:
-            self.client.add_event_callback(self.on_room_message, RoomMessageMedia)
+        self.client.add_event_callback(self.on_room_message, RoomMessage)
         self.client.add_event_callback(self.on_reaction, ReactionEvent)
+        self.client.add_event_callback(self.on_undecrypted_event, MegolmEvent)
+        self.client.add_event_callback(self.on_undecrypted_event, UnknownEncryptedEvent)
 
     def _required_env(self, key: str) -> str:
         value = os.getenv(key)
@@ -494,6 +499,15 @@ class MatrixBot:
         queue = self.pendingSwipes.get(room_id, [])
         queue.append((target_event_id, action))
         self.pendingSwipes[room_id] = queue
+
+    async def on_undecrypted_event(self, room: MatrixRoom, event: Any):
+        room_id = self._room_id(room) or "<unknown-room>"
+        sender = self._sender(event) or "<unknown-sender>"
+        event_id = self._event_id(event) or "<unknown-event>"
+        print(
+            f"[Matrix:{room_id}] Received undecrypted event {event_id} from {sender}. "
+            "This usually means missing E2EE room keys for this device/session."
+        )
 
     def _append_recent_message(self, room_id: str, message: dict[str, Any]):
         existing = self.recentMessages.get(room_id)
