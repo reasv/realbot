@@ -780,7 +780,7 @@ class MatrixBot:
                     author = lp.get("author", "")
                     text = lp.get("text", "")
                     if author and text:
-                        lines.append(f"{url} — @{author}: {text}")
+                        lines.append(f"{url} — {author}: {text}")
                     elif text:
                         lines.append(f"{url} — {text}")
                 else:
@@ -858,6 +858,7 @@ class MatrixBot:
             if tweet_text or author_handle:
                 author = f"@{author_handle}" if author_handle else author_name
                 preview = {
+                    "source": "twitter",
                     "url": tweet_url,
                     "author": author,
                     "text": tweet_text,
