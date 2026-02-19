@@ -628,7 +628,12 @@ class MatrixBot:
             return await self._constant_chat(room_id, evt)
 
         if _is_whitelisted(room_id, "rand"):
+            log.debug(
+                "[%s] Routing to random_chat (mentioned=%s)", room_id, is_mentioned
+            )
             return await self._random_chat(room_id, evt, is_mentioned)
+
+        log.debug("[%s] Room not whitelisted, ignoring", room_id)
 
         # If mentioned in a mentions channel that didn't match above,
         # or not whitelisted at all -- ignore.
@@ -694,7 +699,14 @@ class MatrixBot:
 
         # Roll for engagement
         chance = config.get("engagement_chance", 10)
-        if random.randint(0, chance) != 0:
+        roll = random.randint(0, chance)
+        log.debug(
+            "[%s] Random chat roll: %d/%d (need 0 to engage)",
+            room_id,
+            roll,
+            chance,
+        )
+        if roll != 0:
             if is_mentioned and config.get("respond_to_mentions", True):
                 msg = await self._process_message(evt)
                 self._add_to_queue(room_id, msg)
