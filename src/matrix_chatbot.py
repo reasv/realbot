@@ -22,11 +22,13 @@ import logging
 import os
 import random
 import re
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from mautrix.client import Client
+from mautrix.client.encryption_manager import DecryptionDispatcher
 from mautrix.client.state_store.memory import MemoryStateStore
 from mautrix.client.syncer import InternalEventType
 from mautrix.crypto import OlmMachine
@@ -238,6 +240,55 @@ class BotStateStore(MemoryStateStore):
         return shared
 
 
+# ── Custom decryption dispatcher ─────────────────────────────────────
+
+
+class RetryingDecryptionDispatcher(DecryptionDispatcher):
+    """DecryptionDispatcher that waits for missing Megolm sessions before
+    giving up.  The stock dispatcher logs a warning and drops the event;
+    this one calls ``wait_for_session()`` (up to 5 s) so key-shares that
+    arrive in the same or next sync batch can still satisfy the decrypt."""
+
+    async def handle(self, evt: Any) -> None:
+        try:
+            decrypted = await self.client.crypto.decrypt_megolm_event(evt)
+        except Exception as first_err:
+            session_id = getattr(getattr(evt, "content", None), "session_id", None)
+            if session_id:
+                log.debug(
+                    "Waiting up to 5 s for session %s (event %s)…",
+                    session_id,
+                    evt.event_id,
+                )
+                arrived = await self.client.crypto.wait_for_session(
+                    evt.room_id, session_id, timeout=5
+                )
+                if arrived:
+                    try:
+                        decrypted = await self.client.crypto.decrypt_megolm_event(evt)
+                    except Exception as retry_err:
+                        self.client.crypto_log.warning(
+                            "Failed to decrypt %s after session wait: %s",
+                            evt.event_id,
+                            retry_err,
+                        )
+                        return
+                else:
+                    self.client.crypto_log.warning(
+                        "Failed to decrypt %s: %s (session %s never arrived)",
+                        evt.event_id,
+                        first_err,
+                        session_id,
+                    )
+                    return
+            else:
+                self.client.crypto_log.warning(
+                    "Failed to decrypt %s: %s", evt.event_id, first_err
+                )
+                return
+        self.client.dispatch_event(decrypted, evt.source)
+
+
 # ── Data classes ─────────────────────────────────────────────────────
 
 
@@ -312,6 +363,21 @@ class MatrixBot:
             db=self.crypto_db,
         )
 
+        # When the crypto store has no existing Olm account (fresh DB), we
+        # MUST create a new device so the homeserver broadcasts
+        # device_lists.changed and other clients discover our identity keys.
+        # Re-using a stale device_id (e.g. from MATRIX_DEVICE_ID env var)
+        # skips that notification, so senders never learn about us.
+        existing_account = await self.crypto_store.get_account()
+        if existing_account is None and self.device_id:
+            log.info(
+                "Fresh crypto store: discarding stale device_id %s "
+                "to force new device creation on login",
+                self.device_id,
+            )
+            self.device_id = ""
+            self.access_token = ""  # token is tied to old device
+
         # Client
         self.client = Client(
             mxid=self.bot_mxid,
@@ -345,8 +411,10 @@ class MatrixBot:
         self.client.add_event_handler(EventType.REACTION, self._on_reaction)
         self.client.add_event_handler(InternalEventType.INVITE, self._on_invite)
 
-        # Skip historical events from initial sync
-        self.client.ignore_initial_sync = True
+        # NOTE: we do NOT set ignore_initial_sync because it drops ALL
+        # events including to-device key shares needed for E2EE.  Instead we
+        # gate room-event handlers behind _initial_sync_done.
+        self._initial_sync_done = False
 
         # Wait for first successful sync before entering inference loop
         sync_ready = asyncio.Event()
@@ -359,6 +427,7 @@ class MatrixBot:
         self.client.start(filter_data=None)
         log.info("Waiting for initial sync...")
         await sync_ready.wait()
+        self._initial_sync_done = True
         log.info("Sync established -- entering inference loop")
 
         # Remove the one-shot handler
@@ -424,13 +493,51 @@ class MatrixBot:
             crypto_store=self.crypto_store,
             state_store=self.state_store,
         )
-        # Setting client.crypto auto-registers DecryptionDispatcher
+        # Setting client.crypto auto-registers the stock DecryptionDispatcher
         self.client.crypto = self.crypto_machine
+
+        # Replace with our retry-capable dispatcher that waits for session
+        # keys instead of silently dropping undecryptable events.
+        self.client.remove_dispatcher(DecryptionDispatcher)
+        self.client.add_dispatcher(RetryingDecryptionDispatcher)
+
         await self.crypto_machine.load()
         # Upload device identity keys and one-time keys to the homeserver
         # so other clients can discover us and share Megolm session keys.
         await self.crypto_machine.share_keys()
-        log.info("E2EE initialised (device %s)", self.device_id)
+        log.info(
+            "E2EE initialised (device %s, curve25519 %s)",
+            self.device_id,
+            self.crypto_machine.account.identity_keys.get("curve25519", "?"),
+        )
+
+        # Verify our keys are actually on the server
+        try:
+            key_resp = await self.client.query_keys({self.bot_mxid: []})
+            server_devices = key_resp.get("device_keys", {}).get(self.bot_mxid, {})
+            log.info(
+                "Server reports %d device(s) for %s: %s",
+                len(server_devices),
+                self.bot_mxid,
+                list(server_devices.keys()),
+            )
+            our_dev = server_devices.get(self.device_id, {})
+            server_curve = our_dev.get("keys", {}).get(
+                f"curve25519:{self.device_id}", "NOT FOUND"
+            )
+            local_curve = self.crypto_machine.account.identity_keys.get(
+                "curve25519", "?"
+            )
+            if server_curve == local_curve:
+                log.info("Key verification OK: server curve25519 matches local")
+            else:
+                log.error(
+                    "KEY MISMATCH: server has curve25519=%s but local is %s",
+                    server_curve,
+                    local_curve,
+                )
+        except Exception as exc:
+            log.warning("Failed to query device keys from server: %s", exc)
 
     # ── event handlers ───────────────────────────────────────────────
 
@@ -447,6 +554,10 @@ class MatrixBot:
 
     async def _on_message(self, evt: Any) -> None:
         """Handle incoming ``m.room.message`` events (including decrypted)."""
+        # Ignore events from initial sync (to-device events are still processed
+        # by OlmMachine handlers for E2EE key exchange).
+        if not self._initial_sync_done:
+            return
         # Ignore own messages
         if str(evt.sender) == self.bot_mxid:
             return
@@ -495,6 +606,8 @@ class MatrixBot:
 
     async def _on_reaction(self, evt: Any) -> None:
         """Handle ``m.reaction`` events for swipe controls."""
+        if not self._initial_sync_done:
+            return
         if str(evt.sender) == self.bot_mxid:
             return
 
