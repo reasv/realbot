@@ -171,6 +171,36 @@ def _new_pending_message_id() -> str:
     return f"pending:{uuid.uuid4()}"
 
 
+def _load_override_params() -> dict[str, Any]:
+    override_file = os.getenv("SAMPLING_OVERRIDE_FILE")
+    if not override_file:
+        return {}
+
+    try:
+        with open(override_file, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            return loaded
+        print(f"Sampling override file {override_file} did not contain a JSON object; ignoring.")
+        return {}
+    except FileNotFoundError:
+        override_dir = os.path.dirname(override_file)
+        if override_dir:
+            os.makedirs(override_dir, exist_ok=True)
+        try:
+            with open(override_file, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2)
+        except Exception as e:
+            print(f"Failed to create sampling override file {override_file}: {e}")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Sampling override file {override_file} contains invalid JSON; ignoring. {e}")
+        return {}
+    except Exception as e:
+        print(f"Failed to load sampling override file {override_file}; ignoring. {e}")
+        return {}
+
+
 async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30):
     load_dotenv()
     openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
@@ -193,13 +223,7 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
             },
             *normalize_chat_history(history),
         ]
-    # Load override parameters from a json file
-    override_file = os.getenv("SAMPLING_OVERRIDE_FILE")
-    if override_file is not None:
-        with open(override_file, "r") as f:
-            override_params = json.load(f)
-    else:
-        override_params = {}
+    override_params = _load_override_params()
     try:
         completion = await client.chat.completions.create(
                 model=openai_model,
