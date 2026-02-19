@@ -26,7 +26,7 @@ from .openai_inference import (
     swipe_prev,
     swipe_regenerate,
 )
-from .utils import get_config, dequote
+from .utils import get_config, dequote, is_whitelisted_id, normalize_id_set
 
 @dataclass
 class RandomChat:
@@ -534,37 +534,22 @@ class Bot(discord.Client):
         queue.append(message)
         self.pendingMessages[channelID] = queue
 
-    def _coerce_int_set(self, values: Any) -> set[int]:
-        if not isinstance(values, list):
-            return set()
-        out: set[int] = set()
-        for v in values:
-            if isinstance(v, bool):
-                continue
-            if isinstance(v, int):
-                out.add(v)
-                continue
-            if isinstance(v, str):
-                s = v.strip()
-                if not s:
-                    continue
-                try:
-                    out.add(int(s))
-                except Exception:
-                    continue
-        return out
+    def _coerce_id_set(self, values: Any) -> set[str]:
+        return normalize_id_set(values)
 
     def _swipe_allowed(self, swipes_cfg: dict[str, Any], user_id: int, channel_id: int) -> bool:
-        user_whitelist = self._coerce_int_set(swipes_cfg.get("user_whitelist"))
-        channel_whitelist = self._coerce_int_set(swipes_cfg.get("channel_whitelist"))
+        user_whitelist = self._coerce_id_set(swipes_cfg.get("user_whitelist"))
+        channel_whitelist = self._coerce_id_set(swipes_cfg.get("channel_whitelist"))
+        user_key = str(user_id)
+        channel_key = str(channel_id)
 
         if not user_whitelist and not channel_whitelist:
             return True
         if not user_whitelist:
-            return channel_id in channel_whitelist
+            return channel_key in channel_whitelist
         if not channel_whitelist:
-            return user_id in user_whitelist
-        return (user_id in user_whitelist) or (channel_id in channel_whitelist)
+            return user_key in user_whitelist
+        return (user_key in user_whitelist) or (channel_key in channel_whitelist)
     
     async def process_messages(self):
         channelIDs = list(set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys()))
@@ -695,11 +680,11 @@ class Bot(discord.Client):
                         print(f"[{channelID}] Swipe reaction cleanup failed: {e}")
 
                     if swipes_cfg.get("auto_react_controls", False):
-                        auto_react_channel_whitelist = self._coerce_int_set(
+                        auto_react_channel_whitelist = self._coerce_id_set(
                             swipes_cfg.get("auto_react_channel_whitelist")
                         )
                         should_auto_react = (not auto_react_channel_whitelist) or (
-                            channelID in auto_react_channel_whitelist
+                            str(channelID) in auto_react_channel_whitelist
                         )
                         if should_auto_react:
                             added: list[str] = []
@@ -761,9 +746,8 @@ class Bot(discord.Client):
 
 def is_whitelisted(channelID: int, wtype: str = 'always'):
     config = get_config()
-    whitelist: list[int] = config["whitelist"][wtype]
-
-    return channelID in whitelist
+    whitelist = config["whitelist"][wtype]
+    return is_whitelisted_id(channelID, whitelist)
 
 def clean_response(resp: str) -> str:
     resp = html.unescape(resp)

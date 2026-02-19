@@ -1,18 +1,27 @@
 import os
 from dotenv import load_dotenv
 import multiprocessing
-
-from src.discord_chatbot import Bot
-from src.irc_chatbot import run_bot
+import asyncio
 
 def start_discord_bot():
     load_dotenv()
+    from src.discord_chatbot import Bot
+
     client = Bot()
     client.run(os.environ['DISCORD_TOKEN'])
 
 def start_irc_bot():
     load_dotenv()
-    run_bot()
+    from src.irc_chatbot import run_bot as run_irc_bot
+
+    run_irc_bot()
+
+
+def start_matrix_bot():
+    load_dotenv()
+    from src.matrix_chatbot import run_bot as run_matrix_bot
+
+    asyncio.run(run_matrix_bot())
 
 if __name__ == '__main__':
     # Create processes for each bot

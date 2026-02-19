@@ -1,63 +1,119 @@
 # realbot
 
-A discord bot that connects with a user accounts using `discord-self` and simulates a real user through LLMs
-
-This bot uses `discord-self` to control "real" user accounts as opposed to regular "bot" accounts, which violates the discord TOS and could get the user account banned.
-As such, the bot appears indistinguishable from a real user to others, aside from its potentially insane ramblings.
+LLM-powered chat bot with multiple transports:
+- Discord (user account via `discord.py-self`)
+- IRC
+- Matrix (user account via `matrix-nio`, including E2EE rooms)
 
 ## Getting started
 
 Requires Python 3.11.
 
-This bot will connect to an instance of [text-generation-webui](https://github.com/oobabooga/text-generation-webui) for inference so ensure you have one running.
+Copy `.env.example` to `.env` and configure credentials.
 
-Copy `.env.example` and rename it to `.env` then add your discord token and the URL of your OpenAI-compatible chat completion API.
+Install dependencies:
 
-Install dependencies
-
-```
-$ pip install -r requirements.txt
+```bash
+pip install -r requirements.txt
 ```
 
-Run the bot
+## Matrix E2EE prerequisite
 
-```
-$ python main.py
+For encrypted Matrix rooms, `matrix-nio[e2e]` requires libolm on the system.
+Install libolm before installing requirements if your platform does not already provide it.
+
+## Run
+
+Run Discord only:
+
+```bash
+python run_discord.py
 ```
 
-The bot will not respond until you have set up the whitelist, see below.
+Run IRC only:
+
+```bash
+python run_irc.py
+```
+
+Run Matrix only:
+
+```bash
+python run_matrix.py
+```
+
+Run the legacy dual-process Discord+IRC launcher:
+
+```bash
+python main.py
+```
+
+## Environment variables
+
+General:
+- `BOT_NAME`
+- `LLM_API_KEY`
+- `OPENAI_API_URL`
+- `SAMPLING_OVERRIDE_FILE`
+
+Discord:
+- `DISCORD_TOKEN`
+
+IRC:
+- `IRC_SERVER`
+- `IRC_PORT`
+- `IRC_NICKNAME`
+- `IRC_CHANNELS`
+
+Matrix:
+- `MATRIX_HOMESERVER`
+- `MATRIX_USER_ID`
+- `MATRIX_ACCESS_TOKEN`
+- `MATRIX_DEVICE_ID`
+- `MATRIX_STORE_PATH` (default: `history/matrix_store`)
+- `MATRIX_SYNC_TIMEOUT_MS` (default: `30000`)
+
+Matrix auth is token-based only. Room joins/invite acceptance are not handled by bot logic; join rooms externally with the bot account.
 
 ## Configuration
 
-In order to change the bot's settings, make a copy of `user.config.toml.example` and rename it to `user.config.toml`, then add your settings overrides there. You can see the default configuration in `default.config.toml`,
-Don't edit the latter, make all your local configuration changes within `user.config.toml`
-
-Settings can be changed at runtime, since the bot re-loads most settings files on every message it receives, and it always opens the configuration files and character sheets in read-only mode, then closes them after reading them.
-Feel free to edit your character profiles and whitelists while the bot is running, in order to instantly see the effects.
-
-Chat history files can also be deleted or edited at runtime, but if the bot was in the process of writing a new message for the corresponding channel while you edit/delete the file, the history file will be overwritten/re-written on disk after, so your changes might be lost.
+Create `user.config.toml` from `user.config.toml.example`.
+Defaults live in `default.config.toml`.
 
 ### Whitelist
 
-You need to whitelist channel IDs in which you want the bot to interact, by adding them to the appropriate whitelist in the configuration file.
+The bot only responds in whitelisted destinations.
+Whitelist entries support mixed ID formats:
+- Discord numeric channel IDs
+- IRC channel names (e.g. `#ai`)
+- Matrix room IDs (e.g. `!roomid:matrix.org`)
 
-The bot will never respond to messages outside of whitelisted channels.
+Buckets:
+- `always`: respond to every message
+- `mentions`: respond only when mentioned
+- `rand`: random-chat behavior
 
-Putting a channel ID under `always` means the bot will respond to every single message from this channel.
+### Random chat
 
-`mentions` means it will only respond when @mentioned, and to targeted replies.
+Configured under `[randomChat]`.
+Controls engagement chance, session duration, cooldown, and whether mentions can bypass failed roll.
 
-`rand` puts the bot in RandomChat mode for said channel(s), which means the bot will respond semi-randomly, more closely emulating human behaviour.
+### Swipes
 
-The parameters for RandomChat can be configured through the appropriate configuration section.
+Configured under `[swipes]`.
+Supports regenerate/prev/next controls, whitelists, and optional auto-react controls.
+`user_whitelist`, `channel_whitelist`, and `auto_react_channel_whitelist` accept both integers and strings.
 
 ### OpenAI output truncation
 
-You can optionally truncate assistant messages based on configurable "stopping strings" from the `openai` section in `user.config.toml`:
-
-- `openai.stopping_strings` (default `["\n"]`)
-- `openai.stopping_strings_limit` (default `-1`, disabled). If set to `N`, the bot truncates after the `(N + 1)`th run of one-or-more consecutive stopping strings (runs are counted globally across all stopping strings). Whitespace-only stopping strings are stripped from the end after truncation.
+Optional truncation controls under `[openai]`:
+- `stopping_strings`
+- `stopping_strings_limit`
 
 ### Image context
 
-Image attachments from Discord and links shared on IRC are automatically captured and included in the prompt that is sent to the LLM. A cached copy of every downloaded image is written to `history/images/` so chat history can be replayed later. If you want to limit how many recent images are preserved in the prompt, set `CONTEXT_IMAGE_LIMIT` in your `.env` file (defaults to `8`). The oldest images are dropped first once that cap is exceeded.
+- Discord attachments and embeds are captured.
+- IRC image URLs are captured.
+- Matrix image events and image URLs are captured, including encrypted-room media when decryption succeeds.
+
+Cached images are written under `history/images/` so history replay can include image context.

@@ -279,13 +279,13 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
     if reply is None:
         return None
 
-    pending_message_id: str | None = None
-    if isinstance(channelID, int):
-        pending_message_id = _new_pending_message_id()
+    pending_message_id = _new_pending_message_id()
 
-    assistant_message: dict[str, Any] = {"user": "{{char}}", "message": reply}
-    if isinstance(channelID, int):
-        assistant_message["messageId"] = pending_message_id
+    assistant_message: dict[str, Any] = {
+        "user": "{{char}}",
+        "message": reply,
+        "messageId": pending_message_id,
+    }
     history["messages"].append(assistant_message)
     save_channel_history(channelID, history)
 

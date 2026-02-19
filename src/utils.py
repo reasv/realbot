@@ -25,6 +25,40 @@ def dequote(s):
         return s[1:-1]
     return s
 
+
+def normalize_id(value: Any) -> str | None:
+    """
+    Converts IDs from config/runtime into a stable string form.
+    Supports int and str values and ignores booleans/empty values.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if trimmed:
+            return trimmed
+    return None
+
+
+def normalize_id_set(values: Any) -> set[str]:
+    if not isinstance(values, list):
+        return set()
+    out: set[str] = set()
+    for value in values:
+        normalized = normalize_id(value)
+        if normalized is not None:
+            out.add(normalized)
+    return out
+
+
+def is_whitelisted_id(value: Any, whitelist_values: Any) -> bool:
+    normalized = normalize_id(value)
+    if normalized is None:
+        return False
+    return normalized in normalize_id_set(whitelist_values)
+
 def _ensure_content_list(content: Any) -> List[Dict[str, Any]]:
     """
     Converts a string or list of OpenAI message segments into a normalized list.

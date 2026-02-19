@@ -13,7 +13,7 @@ import irc.connection
 
 from .chat_image_utils import build_remote_image_record
 from .openai_inference import chat_inference
-from .utils import get_config, dequote
+from .utils import get_config, dequote, is_whitelisted_id
 
 @dataclass
 class RandomChat:
@@ -149,7 +149,7 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
         """
         cfg = get_config()
         channels = cfg.get("whitelist", {}).get(wtype, [])
-        return channel in channels
+        return is_whitelisted_id(channel, channels)
 
     def is_mentioned(self, text: str) -> bool:
         """Check if our nickname is in the text."""

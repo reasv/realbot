@@ -1,5 +1,8 @@
 [whitelist]
-always = []
+always = [
+    # Discord channel IDs (int) and IRC/Matrix IDs (string) are supported.
+    # "!your_room_id:matrix.org",
+]
 mentions = []
 rand = []
 
@@ -26,6 +29,7 @@ auto_react_controls = true
 regen_emoji = "🔄"
 prev_emoji = "◀️"
 next_emoji = "▶️"
+# Whitelists accept either numeric IDs (Discord) or string IDs (IRC/Matrix).
 user_whitelist = []
 channel_whitelist = []
 auto_react_channel_whitelist = []
