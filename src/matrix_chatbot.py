@@ -762,13 +762,39 @@ class MatrixBot:
             "messageId": str(evt.event_id),
         }
 
-        images = await self._extract_images(evt)
+        images, link_previews = await self._extract_images(evt)
         if images:
             processed["images"] = images
             # LLMs like Claude error on image-only messages with no text,
             # so ensure there is always *some* text content.
             if not processed["message"]:
                 processed["message"] = "image.png"
+
+        # Append link preview text so the LLM can see page/tweet content.
+        if link_previews:
+            lines: list[str] = []
+            for lp in link_previews:
+                src = lp.get("source", "")
+                url = lp.get("url", "")
+                if src == "twitter":
+                    author = lp.get("author", "")
+                    text = lp.get("text", "")
+                    if author and text:
+                        lines.append(f"{url} — @{author}: {text}")
+                    elif text:
+                        lines.append(f"{url} — {text}")
+                else:
+                    title = lp.get("title", "")
+                    desc = lp.get("description", "")
+                    if title and desc:
+                        lines.append(f"{url} — {title}: {desc}")
+                    elif title:
+                        lines.append(f"{url} — {title}")
+                    elif desc:
+                        lines.append(f"{url} — {desc}")
+            if lines:
+                block = "\n".join(lines)
+                processed["message"] += f"\n\n[Link Previews]\n{block}"
 
         return processed
 
@@ -794,14 +820,21 @@ class MatrixBot:
             )
         return text
 
-    async def _fetch_twitter_images(self, tweet_url: str, room_id: str) -> list[dict]:
-        """Fetch images from a tweet via the fxtwitter API (supports multiple images)."""
+    async def _fetch_twitter_images(
+        self, tweet_url: str, room_id: str
+    ) -> tuple[list[dict], dict | None]:
+        """Fetch images and text from a tweet via the fxtwitter API.
+
+        Returns ``(images, preview)`` where *preview* is a dict with
+        ``url``, ``author``, ``text`` (or ``None`` on failure).
+        """
         match = _TWITTER_STATUS_RE.search(tweet_url)
         if not match:
-            return []
+            return [], None
         status_id = match.group(1)
         api_url = f"https://api.fxtwitter.com/status/{status_id}"
-        result: list[dict] = []
+        images: list[dict] = []
+        preview: dict | None = None
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -814,13 +847,27 @@ class MatrixBot:
                             resp.status,
                             tweet_url,
                         )
-                        return []
+                        return [], None
                     data = await resp.json()
             tweet = data.get("tweet", {})
+
+            # -- text metadata --
+            author_handle = tweet.get("author", {}).get("screen_name", "")
+            author_name = tweet.get("author", {}).get("name", "")
+            tweet_text = tweet.get("text", "")
+            if tweet_text or author_handle:
+                author = f"@{author_handle}" if author_handle else author_name
+                preview = {
+                    "url": tweet_url,
+                    "author": author,
+                    "text": tweet_text,
+                }
+
+            # -- photos --
             photos = tweet.get("media", {}).get("photos", [])
             if not photos:
                 log.info("[%s] Tweet %s has no photos", room_id, status_id)
-                return []
+                return images, preview
             log.info("[%s] Tweet %s has %d photo(s)", room_id, status_id, len(photos))
             for photo in photos:
                 img_url = photo.get("url")
@@ -828,7 +875,7 @@ class MatrixBot:
                     continue
                 try:
                     local = await download_image_to_history(room_id, img_url)
-                    result.append(
+                    images.append(
                         {
                             "source": "twitter",
                             "url": img_url,
@@ -842,13 +889,20 @@ class MatrixBot:
                         img_url,
                         exc,
                     )
-                    result.append(build_remote_image_record(img_url, source="twitter"))
+                    images.append(build_remote_image_record(img_url, source="twitter"))
         except Exception as exc:
             log.warning("[%s] fxtwitter API error for %s: %s", room_id, tweet_url, exc)
-        return result
+        return images, preview
 
-    async def _extract_images(self, evt: Any) -> list[dict]:
+    async def _extract_images(self, evt: Any) -> tuple[list[dict], list[dict]]:
+        """Return (images, link_previews).
+
+        ``images``      – image records for the inference vision pipeline.
+        ``link_previews`` – text metadata dicts for each resolved link,
+                           appended to the user message so the LLM has context.
+        """
         images: list[dict] = []
+        link_previews: list[dict] = []
         content = evt.content
         room_id = str(evt.room_id)
 
@@ -897,7 +951,7 @@ class MatrixBot:
                     )
 
         if len(images) >= max_images:
-            return images[:max_images]
+            return images[:max_images], link_previews
 
         # ── 2. URLs in text body ─────────────────────────────────────────
         body = getattr(content, "body", None) or ""
@@ -961,20 +1015,24 @@ class MatrixBot:
                 images.append(build_remote_image_record(img_url, source="matrix_url"))
 
         if len(images) >= max_images:
-            return images[:max_images]
+            return images[:max_images], link_previews
 
         # ── 2b. Twitter/X URLs -- fetch via fxtwitter API ────────────────
         for tweet_url in twitter_urls:
             if len(images) >= max_images:
                 break
-            tweet_images = await self._fetch_twitter_images(tweet_url, room_id)
+            tweet_images, tweet_preview = await self._fetch_twitter_images(
+                tweet_url, room_id
+            )
+            if tweet_preview:
+                link_previews.append(tweet_preview)
             for ti in tweet_images:
                 if len(images) >= max_images:
                     break
                 images.append(ti)
 
         if len(images) >= max_images:
-            return images[:max_images]
+            return images[:max_images], link_previews
 
         # ── 2c. Non-image URLs -- fetch link previews via homeserver ─────
         # The homeserver fetches og:image (like Discord's embed previews)
@@ -990,6 +1048,12 @@ class MatrixBot:
             try:
                 log.info("[%s] Fetching link preview for %s", room_id, page_url)
                 preview = await self.client.get_url_preview(page_url)
+                p_title = getattr(preview, "title", "") or ""
+                p_desc = getattr(preview, "description", "") or ""
+                if p_title or p_desc:
+                    link_previews.append(
+                        {"url": page_url, "title": p_title, "description": p_desc}
+                    )
                 og_image = getattr(preview, "image", None)
                 og_image_url = getattr(og_image, "url", None) if og_image else None
                 if not og_image_url:
@@ -997,14 +1061,14 @@ class MatrixBot:
                         "[%s] Preview for %s has no og:image (title: %s)",
                         room_id,
                         page_url,
-                        getattr(preview, "title", ""),
+                        p_title,
                     )
                     continue
                 log.info(
                     "[%s] Preview has og:image %s (title: %s)",
                     room_id,
                     og_image_url,
-                    getattr(preview, "title", ""),
+                    p_title,
                 )
                 try:
                     data = await self.client.download_media(og_image_url)
@@ -1018,7 +1082,7 @@ class MatrixBot:
                         {
                             "source": "matrix_preview",
                             "url": page_url,
-                            "preview_title": getattr(preview, "title", "") or "",
+                            "preview_title": p_title,
                             "local_path": local,
                         }
                     )
@@ -1045,7 +1109,7 @@ class MatrixBot:
                 len(result),
                 [img.get("source") for img in result],
             )
-        return result
+        return result, link_previews
 
     # ── queue management ─────────────────────────────────────────────
 
