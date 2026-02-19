@@ -57,7 +57,13 @@ from .openai_inference import (
     swipe_prev,
     swipe_regenerate,
 )
-from .utils import dequote, get_config, is_whitelisted_id, normalize_id, normalize_id_set
+from .utils import (
+    dequote,
+    get_config,
+    is_whitelisted_id,
+    normalize_id,
+    normalize_id_set,
+)
 
 IMAGE_URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
@@ -152,7 +158,9 @@ def dedupe_swipe_jobs(swipe_jobs: Sequence[tuple[str, str]]) -> list[tuple[str, 
 
     return [
         (message_id, action)
-        for message_id, (i, action) in sorted(last_by_message.items(), key=lambda kv: kv[1][0])
+        for message_id, (i, action) in sorted(
+            last_by_message.items(), key=lambda kv: kv[1][0]
+        )
     ]
 
 
@@ -176,7 +184,9 @@ def build_text_content(
         content["format"] = "org.matrix.custom.html"
         content["formatted_body"] = formatted_body
     if mention_user_ids:
-        content["m.mentions"] = {"user_ids": _unique_preserve(str(uid) for uid in mention_user_ids)}
+        content["m.mentions"] = {
+            "user_ids": _unique_preserve(str(uid) for uid in mention_user_ids)
+        }
     return content
 
 
@@ -268,12 +278,17 @@ def apply_generated_at_mentions(
 
             candidates_to_try = [candidate_base]
             candidate_stripped = candidate_base.rstrip("\"'`.,!?;:()[]{}<>")
-            if candidate_stripped and candidate_stripped.casefold() != candidate_base.casefold():
+            if (
+                candidate_stripped
+                and candidate_stripped.casefold() != candidate_base.casefold()
+            ):
                 candidates_to_try.append(candidate_stripped)
 
             for candidate in candidates_to_try:
                 after_idx = i + 1 + len(candidate)
-                if after_idx < len(content) and not _is_mention_boundary_char(content[after_idx]):
+                if after_idx < len(content) and not _is_mention_boundary_char(
+                    content[after_idx]
+                ):
                     continue
 
                 resolved_user_id = resolver(candidate)
@@ -382,11 +397,14 @@ class MatrixBot:
         print(f"[Matrix] Starting sync as {self.user_id} on {self.homeserver}")
         await self.client.sync(timeout=self.sync_timeout_ms, full_state=True)
         print("[Matrix] Initial sync complete")
+        await self._force_upload_device_keys()
         await self._refresh_e2ee_state(force=True, reason="startup")
         await self._diagnose_own_device_identity()
         self.bg_task = asyncio.create_task(self.inference_loop_task())
         try:
-            await self.client.sync_forever(timeout=self.sync_timeout_ms, full_state=False)
+            await self.client.sync_forever(
+                timeout=self.sync_timeout_ms, full_state=False
+            )
         finally:
             if self.bg_task:
                 self.bg_task.cancel()
@@ -449,6 +467,43 @@ class MatrixBot:
         except Exception as e:
             print(f"[Matrix] Failed to import room keys: {e}")
 
+    async def _force_upload_device_keys(self) -> None:
+        """
+        Force re-upload of device identity keys (curve25519, ed25519) to the
+        homeserver.
+
+        matrix-nio only includes device identity keys in the /keys/upload
+        payload when ``account.shared`` is False (i.e. the very first upload).
+        After that flag is persisted as True in the crypto store, subsequent
+        uploads only send one-time keys.  If the homeserver ever loses the
+        device (server migration, manual session deletion, DB reset, …) the
+        bot's device becomes "unknown" to other clients and encrypted messages
+        appear as "Encrypted by an unknown or deleted device" or fail to
+        decrypt entirely.
+
+        Resetting the flag and re-uploading is safe: the Matrix spec says
+        ``/keys/upload`` is idempotent — the homeserver simply replaces any
+        existing device keys.
+        """
+        olm = getattr(self.client, "olm", None)
+        if olm is None:
+            return
+        account = getattr(olm, "account", None)
+        if account is None:
+            return
+
+        try:
+            account.shared = False
+            response = await self.client.keys_upload()
+            if response.__class__.__name__.endswith("Error"):
+                print(f"[Matrix] Forced device-key upload failed: {response}")
+            else:
+                print(
+                    "[Matrix] Forced device-key upload complete (identity keys re-published)"
+                )
+        except Exception as e:
+            print(f"[Matrix] Forced device-key upload exception: {e}")
+
     async def _refresh_e2ee_state(self, force: bool = False, reason: str = "") -> None:
         now = time.time()
         if not force and (now - self.lastE2EERefreshAt) < 10:
@@ -502,7 +557,9 @@ class MatrixBot:
         except Exception as e:
             print(f"[Matrix] send_to_device_messages exception{suffix}: {e}")
 
-    def _summarize_missing_sessions(self, missing: dict[str, list[str]], max_items: int = 6) -> str:
+    def _summarize_missing_sessions(
+        self, missing: dict[str, list[str]], max_items: int = 6
+    ) -> str:
         pairs: list[str] = []
         for user_id, device_ids in missing.items():
             for device_id in device_ids:
@@ -593,24 +650,40 @@ class MatrixBot:
             per_user = all_device_keys.get(self.user_id, {})
             if not isinstance(per_user, dict):
                 return None, None
-            per_device = per_user.get(self.device_id, {})
-            if not isinstance(per_device, dict):
-                return None, None
-            keys = per_device.get("keys", {})
-            if not isinstance(keys, dict):
+            per_device = per_user.get(self.device_id)
+            if per_device is None:
                 return None, None
 
-            curve = keys.get(f"curve25519:{self.device_id}")
-            if not isinstance(curve, str) or not curve:
-                curve = keys.get("curve25519")
-            ed = keys.get(f"ed25519:{self.device_id}")
-            if not isinstance(ed, str) or not ed:
-                ed = keys.get("ed25519")
+            # matrix-nio returns OlmDevice objects (not raw dicts) in
+            # KeysQueryResponse.device_keys.  Handle both OlmDevice and
+            # raw-dict shapes so the diagnostic works reliably.
+            curve: str | None = None
+            ed: str | None = None
 
-            return (
-                curve if isinstance(curve, str) and curve else None,
-                ed if isinstance(ed, str) and ed else None,
-            )
+            if hasattr(per_device, "curve25519") and hasattr(per_device, "ed25519"):
+                # OlmDevice – read keys directly from properties.
+                raw_curve = getattr(per_device, "curve25519", None)
+                raw_ed = getattr(per_device, "ed25519", None)
+                if isinstance(raw_curve, str) and raw_curve:
+                    curve = raw_curve
+                if isinstance(raw_ed, str) and raw_ed:
+                    ed = raw_ed
+            elif isinstance(per_device, dict):
+                # Fallback: raw dict (older nio versions or mocked tests).
+                keys = per_device.get("keys", {})
+                if isinstance(keys, dict):
+                    raw_curve = keys.get(f"curve25519:{self.device_id}") or keys.get(
+                        "curve25519"
+                    )
+                    raw_ed = keys.get(f"ed25519:{self.device_id}") or keys.get(
+                        "ed25519"
+                    )
+                    if isinstance(raw_curve, str) and raw_curve:
+                        curve = raw_curve
+                    if isinstance(raw_ed, str) and raw_ed:
+                        ed = raw_ed
+
+            return (curve, ed)
         except Exception as e:
             print(f"[Matrix] Failed to parse self keys_query response: {e}")
             return None, None
@@ -635,30 +708,54 @@ class MatrixBot:
 
         remote_curve, remote_ed = await self._query_server_device_keys_for_self()
 
+        needs_reupload = False
+
         if remote_curve is None and remote_ed is None:
             print(
-                "[Matrix] Could not verify own device keys via explicit /keys/query. "
-                "This may be a homeserver response/caching issue; if clients show "
-                "'unknown/deleted device', local vs server device keys may still be mismatched."
+                "[Matrix] No device keys found on homeserver for this device. "
+                "Will force re-upload."
             )
-            return
-
-        if local_curve and remote_curve and local_curve != remote_curve:
+            needs_reupload = True
+        elif local_curve and remote_curve and local_curve != remote_curve:
             print(
-                "[Matrix] Warning: local crypto identity key does not match homeserver "
-                f"device key for {self.device_id}. Encrypted sends may appear as "
-                "'unknown/deleted device'. Reset MATRIX_STORE_PATH and restart."
+                "[Matrix] Warning: local curve25519 identity key does not match "
+                f"homeserver device key for {self.device_id}. "
+                "Will force re-upload to fix."
             )
-            return
-        if local_ed and remote_ed and local_ed != remote_ed:
+            needs_reupload = True
+        elif local_ed and remote_ed and local_ed != remote_ed:
             print(
-                "[Matrix] Warning: local ed25519 signing key does not match homeserver "
-                f"device key for {self.device_id}. Encrypted sends may appear as "
-                "'unknown/deleted device'. Reset MATRIX_STORE_PATH and restart."
+                "[Matrix] Warning: local ed25519 signing key does not match "
+                f"homeserver device key for {self.device_id}. "
+                "Will force re-upload to fix."
             )
-            return
+            needs_reupload = True
+        else:
+            print(
+                f"[Matrix] Verified local device keys match homeserver for {self.device_id}."
+            )
 
-        print(f"[Matrix] Verified local device keys match homeserver for {self.device_id}.")
+        if needs_reupload:
+            await self._force_upload_device_keys()
+            # Re-verify after upload
+            remote_curve2, remote_ed2 = await self._query_server_device_keys_for_self()
+            if (
+                remote_curve2
+                and remote_ed2
+                and remote_curve2 == local_curve
+                and remote_ed2 == local_ed
+            ):
+                print(
+                    f"[Matrix] Device keys now match homeserver for {self.device_id} "
+                    "after re-upload."
+                )
+            else:
+                print(
+                    f"[Matrix] Warning: device keys may still be mismatched for "
+                    f"{self.device_id} after re-upload attempt. "
+                    "If 'unknown/deleted device' persists, try deleting the crypto "
+                    "store at MATRIX_STORE_PATH and restarting."
+                )
 
     async def _prepare_room_encryption(self, room_id: str) -> None:
         room = self._room_for_id(room_id)
@@ -683,9 +780,13 @@ class MatrixBot:
                     if getattr(self.client, "should_query_keys", False):
                         qresp = await self.client.keys_query()
                         if qresp.__class__.__name__.endswith("Error"):
-                            print(f"[Matrix:{room_id}] keys_query failed (attempt {attempt}): {qresp}")
+                            print(
+                                f"[Matrix:{room_id}] keys_query failed (attempt {attempt}): {qresp}"
+                            )
                 except Exception as e:
-                    print(f"[Matrix:{room_id}] keys_query exception (attempt {attempt}): {e}")
+                    print(
+                        f"[Matrix:{room_id}] keys_query exception (attempt {attempt}): {e}"
+                    )
 
                 missing = self.client.get_missing_sessions(room_id)
                 if not missing:
@@ -702,7 +803,9 @@ class MatrixBot:
                 try:
                     cresp = await self.client.keys_claim(missing)
                     if cresp.__class__.__name__.endswith("Error"):
-                        print(f"[Matrix:{room_id}] keys_claim failed (attempt {attempt}): {cresp}")
+                        print(
+                            f"[Matrix:{room_id}] keys_claim failed (attempt {attempt}): {cresp}"
+                        )
                     else:
                         missing_pairs = self._missing_pairs_set(missing)
                         claimed_pairs = self._extract_claimed_pairs(cresp)
@@ -731,7 +834,9 @@ class MatrixBot:
                                 f"{failures}"
                             )
                 except Exception as e:
-                    print(f"[Matrix:{room_id}] keys_claim exception (attempt {attempt}): {e}")
+                    print(
+                        f"[Matrix:{room_id}] keys_claim exception (attempt {attempt}): {e}"
+                    )
 
                 try:
                     await self.client.send_to_device_messages()
@@ -762,7 +867,9 @@ class MatrixBot:
                         "a fresh outbound Megolm session."
                     )
                 self.roomsWithMissingOlmSessions.discard(room_id)
-                self._invalidate_outbound_group_session(room_id, "Olm sessions recovered")
+                self._invalidate_outbound_group_session(
+                    room_id, "Olm sessions recovered"
+                )
 
             # Pre-share outbound group session when needed.
             try:
@@ -774,6 +881,15 @@ class MatrixBot:
                     )
                     if sresp.__class__.__name__.endswith("Error"):
                         print(f"[Matrix:{room_id}] share_group_session failed: {sresp}")
+                    # Flush any remaining queued to-device messages (e.g. key
+                    # forwards) that may have been queued during session sharing.
+                    try:
+                        await self.client.send_to_device_messages()
+                    except Exception as e2:
+                        print(
+                            f"[Matrix:{room_id}] send_to_device_messages after "
+                            f"share_group_session failed: {e2}"
+                        )
             except LocalProtocolError:
                 pass
             except Exception as e:
@@ -857,7 +973,9 @@ class MatrixBot:
 
         self._append_recent_message(room_id, processed)
 
-        if self.is_whitelisted(room_id, "mentions") and self.is_mentioned(content, room):
+        if self.is_whitelisted(room_id, "mentions") and self.is_mentioned(
+            content, room
+        ):
             await self.constantChat(room_id, processed)
             return
 
@@ -926,7 +1044,11 @@ class MatrixBot:
         sender_key = str(getattr(event, "sender_key", "") or "")
         room_key = str(getattr(event, "room_id", "") or room_id)
         cache_key = (room_key, sender_key, session_id)
-        if session_id and sender_key and cache_key in self.requestedMissingMegolmSessions:
+        if (
+            session_id
+            and sender_key
+            and cache_key in self.requestedMissingMegolmSessions
+        ):
             return
 
         try:
@@ -1059,7 +1181,9 @@ class MatrixBot:
             return bytes(body)
         return None
 
-    def _decrypt_attachment(self, ciphertext: bytes, file_obj: dict[str, Any]) -> bytes | None:
+    def _decrypt_attachment(
+        self, ciphertext: bytes, file_obj: dict[str, Any]
+    ) -> bytes | None:
         try:
             from nio.crypto.attachments import decrypt_attachment  # type: ignore
         except Exception:
@@ -1085,7 +1209,9 @@ class MatrixBot:
                 continue
         return None
 
-    def _write_image_bytes(self, room_id: str, data: bytes, filename: str | None) -> str:
+    def _write_image_bytes(
+        self, room_id: str, data: bytes, filename: str | None
+    ) -> str:
         directory = ensure_channel_image_dir(room_id)
         safe_name = sanitize_filename(filename or "image")
         target = os.path.join(directory, safe_name)
@@ -1138,7 +1264,9 @@ class MatrixBot:
             return self._is_image_url(body)
         return False
 
-    async def extract_images(self, room_id: str, content: dict[str, Any]) -> list[dict[str, Any]]:
+    async def extract_images(
+        self, room_id: str, content: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         images: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
 
@@ -1155,7 +1283,9 @@ class MatrixBot:
 
         filename = content.get("body")
         filename_str = filename if isinstance(filename, str) else None
-        file_obj = content.get("file") if isinstance(content.get("file"), dict) else None
+        file_obj = (
+            content.get("file") if isinstance(content.get("file"), dict) else None
+        )
         mxc_url = content.get("url")
         if file_obj and isinstance(file_obj.get("url"), str):
             mxc_url = file_obj.get("url")
@@ -1172,10 +1302,14 @@ class MatrixBot:
 
         local_path: str | None = None
         if file_obj:
-            local_path = await self._download_encrypted_image_to_history(room_id, file_obj, filename_str)
+            local_path = await self._download_encrypted_image_to_history(
+                room_id, file_obj, filename_str
+            )
         elif url_for_model and url_for_model.startswith("http"):
             try:
-                local_path = await download_image_to_history(room_id, url_for_model, filename_str)
+                local_path = await download_image_to_history(
+                    room_id, url_for_model, filename_str
+                )
             except Exception as e:
                 print(f"[Matrix:{room_id}] Failed to cache image attachment: {e}")
 
@@ -1230,18 +1364,24 @@ class MatrixBot:
     async def constantChat(self, room_id: str, message: dict[str, Any]):
         self.addToQueue(room_id, message)
 
-    async def randomChat(self, room_id: str, message: dict[str, Any], is_mentioned: bool):
+    async def randomChat(
+        self, room_id: str, message: dict[str, Any], is_mentioned: bool
+    ):
         cfg = get_config().get("randomChat", {})
         now = datetime.datetime.now()
         current = self.randomChats.get(room_id)
 
         if current:
             if now < current.endTime:
-                self.randomChats[room_id].lastMessageId = str(message.get("messageId", ""))
+                self.randomChats[room_id].lastMessageId = str(
+                    message.get("messageId", "")
+                )
                 self.addToQueue(room_id, message)
                 return
             if now < current.nextChatTime:
-                print(f"[Matrix:{room_id}] Not starting random chat until {current.nextChatTime}")
+                print(
+                    f"[Matrix:{room_id}] Not starting random chat until {current.nextChatTime}"
+                )
                 return
 
         engagement_chance = cfg.get("engagement_chance", 10)
@@ -1259,7 +1399,9 @@ class MatrixBot:
         if current:
             for msg in msgs:
                 if str(msg.get("messageId", "")) == current.lastMessageId:
-                    print(f"[Matrix:{room_id}] Insufficient new messages for random chat")
+                    print(
+                        f"[Matrix:{room_id}] Insufficient new messages for random chat"
+                    )
                     return
 
         if current != self.randomChats.get(room_id):
@@ -1267,11 +1409,15 @@ class MatrixBot:
 
         min_duration = int(cfg.get("min_chat_duration_seconds", 40))
         max_duration = int(cfg.get("max_chat_duration_seconds", 500))
-        end_time = now + datetime.timedelta(seconds=random.randint(min_duration, max_duration))
+        end_time = now + datetime.timedelta(
+            seconds=random.randint(min_duration, max_duration)
+        )
 
         min_down = int(cfg.get("min_downtime_minutes", 5))
         max_down = int(cfg.get("max_downtime_minutes", 20))
-        next_chat_time = end_time + datetime.timedelta(minutes=random.randint(min_down, max_down))
+        next_chat_time = end_time + datetime.timedelta(
+            minutes=random.randint(min_down, max_down)
+        )
 
         self.randomChats[room_id] = RandomChat(
             endTime=end_time,
@@ -1299,7 +1445,9 @@ class MatrixBot:
     def _coerce_id_set(self, values: Any) -> set[str]:
         return normalize_id_set(values)
 
-    def _swipe_allowed(self, swipes_cfg: dict[str, Any], user_id: str, room_id: str) -> bool:
+    def _swipe_allowed(
+        self, swipes_cfg: dict[str, Any], user_id: str, room_id: str
+    ) -> bool:
         user_whitelist = self._coerce_id_set(swipes_cfg.get("user_whitelist"))
         channel_whitelist = self._coerce_id_set(swipes_cfg.get("channel_whitelist"))
         user_key = normalize_id(user_id)
@@ -1350,7 +1498,9 @@ class MatrixBot:
             pass
         return []
 
-    def _save_control_reactions(self, room_id: str, reactions: list[dict[str, str]]) -> None:
+    def _save_control_reactions(
+        self, room_id: str, reactions: list[dict[str, str]]
+    ) -> None:
         path = self._control_reactions_path(room_id)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -1362,21 +1512,32 @@ class MatrixBot:
         existing = self._load_control_reactions(room_id)
         key = (message_id, emoji, reaction_event_id)
         existing_set = {
-            (r.get("messageId"), r.get("emoji"), r.get("reactionEventId")) for r in existing
+            (r.get("messageId"), r.get("emoji"), r.get("reactionEventId"))
+            for r in existing
         }
         if key in existing_set:
             return
         existing.append(
-            {"messageId": message_id, "emoji": emoji, "reactionEventId": reaction_event_id}
+            {
+                "messageId": message_id,
+                "emoji": emoji,
+                "reactionEventId": reaction_event_id,
+            }
         )
         self._save_control_reactions(room_id, existing)
 
-    async def _remove_control_reaction(self, room_id: str, reaction_event_id: str) -> bool:
+    async def _remove_control_reaction(
+        self, room_id: str, reaction_event_id: str
+    ) -> bool:
         try:
-            await self.client.room_redact(room_id, reaction_event_id, reason="remove swipe control")
+            await self.client.room_redact(
+                room_id, reaction_event_id, reason="remove swipe control"
+            )
             return True
         except Exception as e:
-            print(f"[Matrix:{room_id}] Failed to redact reaction {reaction_event_id}: {e}")
+            print(
+                f"[Matrix:{room_id}] Failed to redact reaction {reaction_event_id}: {e}"
+            )
             return False
 
     async def _set_control_reaction(
@@ -1398,7 +1559,9 @@ class MatrixBot:
                 return
             reaction_event_id = await self.send_reaction(room_id, message_id, emoji)
             if reaction_event_id:
-                self._record_control_reaction(room_id, message_id, emoji, reaction_event_id)
+                self._record_control_reaction(
+                    room_id, message_id, emoji, reaction_event_id
+                )
             return
 
         if not matching:
@@ -1473,7 +1636,9 @@ class MatrixBot:
         mention_user_ids: Sequence[str] | None = None,
     ) -> str | None:
         await self._prepare_room_encryption(room_id)
-        content = build_edit_content(body, target_event_id, formatted_body, mention_user_ids)
+        content = build_edit_content(
+            body, target_event_id, formatted_body, mention_user_ids
+        )
         try:
             response = await self.client.room_send(
                 room_id=room_id,
@@ -1486,7 +1651,9 @@ class MatrixBot:
             print(f"[Matrix:{room_id}] Failed to send edit for {target_event_id}: {e}")
             return None
 
-    async def send_reaction(self, room_id: str, target_event_id: str, emoji: str) -> str | None:
+    async def send_reaction(
+        self, room_id: str, target_event_id: str, emoji: str
+    ) -> str | None:
         content = build_reaction_content(target_event_id, emoji)
         try:
             response = await self.client.room_send(
@@ -1515,7 +1682,9 @@ class MatrixBot:
             except Exception:
                 return
 
-    def _get_mention_indexes_for_room(self, room_id: str) -> tuple[dict[str, str], dict[str, str]]:
+    def _get_mention_indexes_for_room(
+        self, room_id: str
+    ) -> tuple[dict[str, str], dict[str, str]]:
         now = time.time()
         cached = self.roomMentionIndexCache.get(room_id)
         if cached and now - cached[0] < 300:
@@ -1534,7 +1703,11 @@ class MatrixBot:
             if not isinstance(uid, str) or not uid:
                 continue
             display = getattr(user_obj, "display_name", None)
-            display_name = display.strip() if isinstance(display, str) and display.strip() else None
+            display_name = (
+                display.strip()
+                if isinstance(display, str) and display.strip()
+                else None
+            )
             localpart = _extract_localpart(uid) or None
             entries.append((uid, display_name, localpart))
             if display_name:
@@ -1559,7 +1732,9 @@ class MatrixBot:
         self.roomMentionIndexCache[room_id] = (now, display_index, local_index)
         return display_index, local_index
 
-    def _resolve_user_id_for_generated_at_mention(self, room_id: str, name: str) -> str | None:
+    def _resolve_user_id_for_generated_at_mention(
+        self, room_id: str, name: str
+    ) -> str | None:
         stripped = name.strip()
         if not stripped:
             return None
@@ -1581,7 +1756,9 @@ class MatrixBot:
         return apply_generated_at_mentions(content, resolver)
 
     async def process_messages(self):
-        room_ids = list(set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys()))
+        room_ids = list(
+            set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys())
+        )
         tasks = []
 
         for room_id in room_ids:
@@ -1606,21 +1783,31 @@ class MatrixBot:
                         new_text: str | None = None
                         try:
                             if action == "regen":
-                                new_text = await swipe_regenerate(room_id, target_event_id)
+                                new_text = await swipe_regenerate(
+                                    room_id, target_event_id
+                                )
                             elif action == "prev":
                                 new_text = swipe_prev(room_id, target_event_id)
                             elif action == "next":
                                 new_text = swipe_next(room_id, target_event_id)
                         except Exception as e:
-                            print(f"[Matrix:{room_id}] Swipe action failed for {target_event_id}: {e}")
+                            print(
+                                f"[Matrix:{room_id}] Swipe action failed for {target_event_id}: {e}"
+                            )
                             continue
 
                         if new_text:
                             cleaned = clean_response(new_text)
-                            plain, formatted, mentions = await self.resolve_generated_at_mentions(
+                            (
+                                plain,
+                                formatted,
+                                mentions,
+                            ) = await self.resolve_generated_at_mentions(
                                 room_id, cleaned
                             )
-                            await self.send_edit(room_id, target_event_id, plain, formatted, mentions)
+                            await self.send_edit(
+                                room_id, target_event_id, plain, formatted, mentions
+                            )
 
                         try:
                             nav = get_swipe_nav_state(room_id, target_event_id)
@@ -1663,16 +1850,24 @@ class MatrixBot:
                     return
 
                 cleaned = clean_response(response)
-                plain, formatted, mentions = await self.resolve_generated_at_mentions(room_id, cleaned)
-                sent_event_id = await self.send_message(room_id, plain, formatted, mentions)
+                plain, formatted, mentions = await self.resolve_generated_at_mentions(
+                    room_id, cleaned
+                )
+                sent_event_id = await self.send_message(
+                    room_id, plain, formatted, mentions
+                )
                 if sent_event_id:
                     try:
                         if pending_message_id:
-                            finalize_assistant_message_id(room_id, pending_message_id, sent_event_id)
+                            finalize_assistant_message_id(
+                                room_id, pending_message_id, sent_event_id
+                            )
                         else:
                             finalize_last_assistant_message_id(room_id, sent_event_id)
                     except Exception as e:
-                        print(f"[Matrix:{room_id}] Failed to store assistant messageId: {e}")
+                        print(
+                            f"[Matrix:{room_id}] Failed to store assistant messageId: {e}"
+                        )
 
                 swipes_cfg = get_config().get("swipes", {}) or {}
                 try:
@@ -1684,11 +1879,17 @@ class MatrixBot:
                     return
 
                 if swipes_cfg.get("auto_react_controls", False):
-                    allowed_rooms = self._coerce_id_set(swipes_cfg.get("auto_react_channel_whitelist"))
-                    should_auto_react = (not allowed_rooms) or (room_id in allowed_rooms)
+                    allowed_rooms = self._coerce_id_set(
+                        swipes_cfg.get("auto_react_channel_whitelist")
+                    )
+                    should_auto_react = (not allowed_rooms) or (
+                        room_id in allowed_rooms
+                    )
                     if should_auto_react:
                         regen_emoji = str(swipes_cfg.get("regen_emoji", "🔄"))
-                        reaction_event_id = await self.send_reaction(room_id, sent_event_id, regen_emoji)
+                        reaction_event_id = await self.send_reaction(
+                            room_id, sent_event_id, regen_emoji
+                        )
                         if reaction_event_id:
                             self._record_control_reaction(
                                 room_id, sent_event_id, regen_emoji, reaction_event_id
