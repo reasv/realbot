@@ -60,9 +60,10 @@ from .utils import dequote, get_config, is_whitelisted_id, normalize_id_set
 
 log = logging.getLogger(__name__)
 
-# Matches twitter.com and x.com status URLs, captures the status ID.
+# Matches twitter.com, x.com, and popular fixup proxies; captures the status ID.
 _TWITTER_STATUS_RE = re.compile(
-    r"https?://(?:(?:www\.)?(?:twitter\.com|x\.com)"
+    r"https?://(?:(?:www\.)?"
+    r"(?:twitter\.com|x\.com|fxtwitter\.com|vxtwitter\.com|fixupx\.com)"
     r"|mobile\.(?:twitter\.com|x\.com))"
     r"/\w+/status/(\d+)",
     re.IGNORECASE,
@@ -793,15 +794,9 @@ class MatrixBot:
             )
         return text
 
-    # Regex for Twitter/X status URLs
-    _TWITTER_STATUS_RE = re.compile(
-        r"https?://(?:(?:www\.)?(?:twitter\.com|x\.com)|mobile\.(?:twitter\.com|x\.com))/\w+/status/(\d+)",
-        re.IGNORECASE,
-    )
-
     async def _fetch_twitter_images(self, tweet_url: str, room_id: str) -> list[dict]:
         """Fetch images from a tweet via the fxtwitter API (supports multiple images)."""
-        match = self._TWITTER_STATUS_RE.search(tweet_url)
+        match = _TWITTER_STATUS_RE.search(tweet_url)
         if not match:
             return []
         status_id = match.group(1)
@@ -927,7 +922,7 @@ class MatrixBot:
         for url_str in all_urls:
             if image_url_re.fullmatch(url_str):
                 direct_image_urls.append(url_str)
-            elif self._TWITTER_STATUS_RE.match(url_str):
+            elif _TWITTER_STATUS_RE.match(url_str):
                 twitter_urls.append(url_str)
             else:
                 preview_candidates.append(url_str)
@@ -1011,19 +1006,29 @@ class MatrixBot:
                     og_image_url,
                     getattr(preview, "title", ""),
                 )
-                data = await self.client.download_media(og_image_url)
-                filename = "preview.jpg"
-                local = await download_image_to_history(
-                    room_id, str(og_image_url), filename, data=data
-                )
-                images.append(
-                    {
-                        "source": "matrix_preview",
-                        "url": page_url,
-                        "preview_title": getattr(preview, "title", "") or "",
-                        "local_path": local,
-                    }
-                )
+                try:
+                    data = await self.client.download_media(og_image_url)
+                    log.info("[%s] Downloaded og:image: %d bytes", room_id, len(data))
+                    filename = "preview.jpg"
+                    local = await download_image_to_history(
+                        room_id, str(og_image_url), filename, data=data
+                    )
+                    log.info("[%s] Saved preview image to %s", room_id, local)
+                    images.append(
+                        {
+                            "source": "matrix_preview",
+                            "url": page_url,
+                            "preview_title": getattr(preview, "title", "") or "",
+                            "local_path": local,
+                        }
+                    )
+                except Exception as dl_exc:
+                    log.warning(
+                        "[%s] Failed to download og:image %s: %s",
+                        room_id,
+                        og_image_url,
+                        dl_exc,
+                    )
             except Exception as exc:
                 log.warning(
                     "[%s] Link preview failed for %s: %s",
@@ -1032,7 +1037,15 @@ class MatrixBot:
                     exc,
                 )
 
-        return images[:max_images]
+        result = images[:max_images]
+        if result:
+            log.info(
+                "[%s] _extract_images returning %d image(s): %s",
+                room_id,
+                len(result),
+                [img.get("source") for img in result],
+            )
+        return result
 
     # ── queue management ─────────────────────────────────────────────
 
