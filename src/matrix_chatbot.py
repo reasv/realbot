@@ -16,8 +16,10 @@ from dotenv import load_dotenv
 
 try:
     from nio import (
+        Api,
         AsyncClient,
         AsyncClientConfig,
+        KeysQueryResponse,
         LocalProtocolError,
         MatrixRoom,
         MegolmEvent,
@@ -28,8 +30,10 @@ try:
 
     NIO_AVAILABLE = True
 except Exception:
+    Api = Any  # type: ignore
     AsyncClient = None  # type: ignore
     AsyncClientConfig = None  # type: ignore
+    KeysQueryResponse = Any  # type: ignore
     LocalProtocolError = Exception  # type: ignore
     MatrixRoom = Any  # type: ignore
     MegolmEvent = Any  # type: ignore
@@ -308,6 +312,7 @@ class MatrixBot:
     randomChats: dict[str, RandomChat]
     recentMessages: dict[str, deque[dict[str, Any]]]
     roomMentionIndexCache: dict[str, tuple[float, dict[str, str], dict[str, str]]]
+    roomsWithMissingOlmSessions: set[str]
 
     def __init__(self):
         load_dotenv()
@@ -346,6 +351,8 @@ class MatrixBot:
         self.roomMentionIndexCache = {}
         self.roomCache: dict[str, MatrixRoom] = {}
         self.requestedMissingMegolmSessions: set[tuple[str, str, str]] = set()
+        self.roomsWithMissingOlmSessions = set()
+        self.lastE2EERefreshAt: float = 0.0
         self.bg_task: asyncio.Task | None = None
 
         self.client.add_event_callback(self.on_room_message, RoomMessage)
@@ -375,6 +382,8 @@ class MatrixBot:
         print(f"[Matrix] Starting sync as {self.user_id} on {self.homeserver}")
         await self.client.sync(timeout=self.sync_timeout_ms, full_state=True)
         print("[Matrix] Initial sync complete")
+        await self._refresh_e2ee_state(force=True, reason="startup")
+        await self._diagnose_own_device_identity()
         self.bg_task = asyncio.create_task(self.inference_loop_task())
         try:
             await self.client.sync_forever(timeout=self.sync_timeout_ms, full_state=False)
@@ -403,10 +412,20 @@ class MatrixBot:
                 f"[Matrix] Warning: MATRIX_USER_ID ({self.user_id}) does not match token user "
                 f"({actual_user_id})."
             )
+            self.user_id = actual_user_id
         if actual_device_id and actual_device_id != self.device_id:
             print(
                 f"[Matrix] Warning: MATRIX_DEVICE_ID ({self.device_id}) does not match token device "
                 f"({actual_device_id})."
+            )
+            self.device_id = actual_device_id
+
+        if (actual_user_id and actual_user_id != self.client.user_id) or (
+            actual_device_id and actual_device_id != self.client.device_id
+        ):
+            self.client.restore_login(self.user_id, self.device_id, self.access_token)
+            print(
+                f"[Matrix] Using token-bound identity user={self.user_id} device={self.device_id}"
             )
 
     async def _import_keys_if_configured(self) -> None:
@@ -429,6 +448,340 @@ class MatrixBot:
             print(f"[Matrix] Imported room keys from {self.import_keys_path}")
         except Exception as e:
             print(f"[Matrix] Failed to import room keys: {e}")
+
+    async def _refresh_e2ee_state(self, force: bool = False, reason: str = "") -> None:
+        now = time.time()
+        if not force and (now - self.lastE2EERefreshAt) < 10:
+            return
+        self.lastE2EERefreshAt = now
+
+        suffix = f" ({reason})" if reason else ""
+
+        try:
+            if getattr(self.client, "should_upload_keys", False):
+                response = await self.client.keys_upload()
+                if response.__class__.__name__.endswith("Error"):
+                    print(f"[Matrix] keys_upload failed{suffix}: {response}")
+                else:
+                    print(f"[Matrix] keys_upload complete{suffix}")
+        except Exception as e:
+            print(f"[Matrix] keys_upload exception{suffix}: {e}")
+
+        try:
+            if getattr(self.client, "should_query_keys", False):
+                response = await self.client.keys_query()
+                if response.__class__.__name__.endswith("Error"):
+                    print(f"[Matrix] keys_query failed{suffix}: {response}")
+                else:
+                    print(f"[Matrix] keys_query complete{suffix}")
+        except Exception as e:
+            print(f"[Matrix] keys_query exception{suffix}: {e}")
+
+        claim_targets: dict[str, list[str]] = {}
+        try:
+            claim_targets = self.client.get_users_for_key_claiming()
+        except LocalProtocolError:
+            claim_targets = {}
+        except Exception as e:
+            print(f"[Matrix] get_users_for_key_claiming exception{suffix}: {e}")
+
+        if claim_targets:
+            try:
+                response = await self.client.keys_claim(claim_targets)
+                if response.__class__.__name__.endswith("Error"):
+                    print(f"[Matrix] keys_claim failed{suffix}: {response}")
+                else:
+                    print(f"[Matrix] keys_claim complete{suffix}")
+            except LocalProtocolError:
+                pass
+            except Exception as e:
+                print(f"[Matrix] keys_claim exception{suffix}: {e}")
+
+        try:
+            await self.client.send_to_device_messages()
+        except Exception as e:
+            print(f"[Matrix] send_to_device_messages exception{suffix}: {e}")
+
+    def _summarize_missing_sessions(self, missing: dict[str, list[str]], max_items: int = 6) -> str:
+        pairs: list[str] = []
+        for user_id, device_ids in missing.items():
+            for device_id in device_ids:
+                pairs.append(f"{user_id}:{device_id}")
+                if len(pairs) >= max_items:
+                    break
+            if len(pairs) >= max_items:
+                break
+        extra = ""
+        total = sum(len(v) for v in missing.values())
+        if total > len(pairs):
+            extra = f" (+{total - len(pairs)} more)"
+        return ", ".join(pairs) + extra if pairs else "none"
+
+    def _missing_pairs_set(self, missing: dict[str, list[str]]) -> set[tuple[str, str]]:
+        out: set[tuple[str, str]] = set()
+        for user_id, device_ids in missing.items():
+            if not isinstance(user_id, str):
+                continue
+            if not isinstance(device_ids, list):
+                continue
+            for device_id in device_ids:
+                if isinstance(device_id, str) and device_id:
+                    out.add((user_id, device_id))
+        return out
+
+    def _extract_claimed_pairs(self, claim_response: Any) -> set[tuple[str, str]]:
+        claimed: set[tuple[str, str]] = set()
+        one_time_keys = getattr(claim_response, "one_time_keys", None)
+        if not isinstance(one_time_keys, dict):
+            return claimed
+
+        for user_id, per_user in one_time_keys.items():
+            if not isinstance(user_id, str) or not isinstance(per_user, dict):
+                continue
+            for device_id, per_device in per_user.items():
+                if (
+                    isinstance(device_id, str)
+                    and device_id
+                    and isinstance(per_device, dict)
+                    and per_device
+                ):
+                    claimed.add((user_id, device_id))
+        return claimed
+
+    def _summarize_pair_set(
+        self, pairs: set[tuple[str, str]], max_items: int = 6
+    ) -> str:
+        if not pairs:
+            return "none"
+        ordered = sorted(f"{user_id}:{device_id}" for user_id, device_id in pairs)
+        preview = ordered[:max_items]
+        extra = ""
+        if len(ordered) > len(preview):
+            extra = f" (+{len(ordered) - len(preview)} more)"
+        return ", ".join(preview) + extra
+
+    def _invalidate_outbound_group_session(self, room_id: str, reason: str) -> None:
+        invalidate = getattr(self.client, "invalidate_outbound_session", None)
+        if not callable(invalidate):
+            return
+        try:
+            invalidate(room_id)
+            print(f"[Matrix:{room_id}] Rotated outbound Megolm session ({reason}).")
+        except Exception as e:
+            print(f"[Matrix:{room_id}] Failed to rotate outbound Megolm session: {e}")
+
+    async def _query_server_device_keys_for_self(self) -> tuple[str | None, str | None]:
+        """
+        Query the homeserver directly for this bot user's own device keys.
+        This avoids relying on device-store cache/query heuristics.
+        """
+        try:
+            method, path, data = Api.keys_query(self.access_token, {self.user_id})
+            response = await self.client._send(KeysQueryResponse, method, path, data)
+        except Exception as e:
+            print(f"[Matrix] Failed explicit self keys_query request: {e}")
+            return None, None
+
+        if response.__class__.__name__.endswith("Error"):
+            print(f"[Matrix] Self keys_query returned error: {response}")
+            return None, None
+
+        try:
+            all_device_keys = getattr(response, "device_keys", {})
+            if not isinstance(all_device_keys, dict):
+                return None, None
+            per_user = all_device_keys.get(self.user_id, {})
+            if not isinstance(per_user, dict):
+                return None, None
+            per_device = per_user.get(self.device_id, {})
+            if not isinstance(per_device, dict):
+                return None, None
+            keys = per_device.get("keys", {})
+            if not isinstance(keys, dict):
+                return None, None
+
+            curve = keys.get(f"curve25519:{self.device_id}")
+            if not isinstance(curve, str) or not curve:
+                curve = keys.get("curve25519")
+            ed = keys.get(f"ed25519:{self.device_id}")
+            if not isinstance(ed, str) or not ed:
+                ed = keys.get("ed25519")
+
+            return (
+                curve if isinstance(curve, str) and curve else None,
+                ed if isinstance(ed, str) and ed else None,
+            )
+        except Exception as e:
+            print(f"[Matrix] Failed to parse self keys_query response: {e}")
+            return None, None
+
+    async def _diagnose_own_device_identity(self) -> None:
+        local_curve = None
+        local_ed = None
+        try:
+            olm = getattr(self.client, "olm", None)
+            account = getattr(olm, "account", None)
+            identity_keys = getattr(account, "identity_keys", None)
+            if isinstance(identity_keys, dict):
+                maybe_curve = identity_keys.get("curve25519")
+                if isinstance(maybe_curve, str) and maybe_curve:
+                    local_curve = maybe_curve
+                maybe_ed = identity_keys.get("ed25519")
+                if isinstance(maybe_ed, str) and maybe_ed:
+                    local_ed = maybe_ed
+        except Exception:
+            local_curve = None
+            local_ed = None
+
+        remote_curve, remote_ed = await self._query_server_device_keys_for_self()
+
+        if remote_curve is None and remote_ed is None:
+            print(
+                "[Matrix] Could not verify own device keys via explicit /keys/query. "
+                "This may be a homeserver response/caching issue; if clients show "
+                "'unknown/deleted device', local vs server device keys may still be mismatched."
+            )
+            return
+
+        if local_curve and remote_curve and local_curve != remote_curve:
+            print(
+                "[Matrix] Warning: local crypto identity key does not match homeserver "
+                f"device key for {self.device_id}. Encrypted sends may appear as "
+                "'unknown/deleted device'. Reset MATRIX_STORE_PATH and restart."
+            )
+            return
+        if local_ed and remote_ed and local_ed != remote_ed:
+            print(
+                "[Matrix] Warning: local ed25519 signing key does not match homeserver "
+                f"device key for {self.device_id}. Encrypted sends may appear as "
+                "'unknown/deleted device'. Reset MATRIX_STORE_PATH and restart."
+            )
+            return
+
+        print(f"[Matrix] Verified local device keys match homeserver for {self.device_id}.")
+
+    async def _prepare_room_encryption(self, room_id: str) -> None:
+        room = self._room_for_id(room_id)
+        if room is None:
+            return
+        if not getattr(room, "encrypted", False):
+            return
+        if not getattr(self.client, "olm", None):
+            return
+
+        try:
+            if not getattr(room, "members_synced", False):
+                response = await self.client.joined_members(room_id)
+                if response.__class__.__name__.endswith("Error"):
+                    print(f"[Matrix:{room_id}] joined_members failed: {response}")
+
+            # Retry key query + claim a few times before sending.
+            missing_after: dict[str, list[str]] = {}
+            had_missing = False
+            for attempt in range(1, 4):
+                try:
+                    if getattr(self.client, "should_query_keys", False):
+                        qresp = await self.client.keys_query()
+                        if qresp.__class__.__name__.endswith("Error"):
+                            print(f"[Matrix:{room_id}] keys_query failed (attempt {attempt}): {qresp}")
+                except Exception as e:
+                    print(f"[Matrix:{room_id}] keys_query exception (attempt {attempt}): {e}")
+
+                missing = self.client.get_missing_sessions(room_id)
+                if not missing:
+                    missing_after = {}
+                    break
+
+                had_missing = True
+                total_missing = sum(len(v) for v in missing.values())
+                print(
+                    f"[Matrix:{room_id}] Missing Olm sessions for {total_missing} device(s) "
+                    f"(attempt {attempt}); claiming keys."
+                )
+
+                try:
+                    cresp = await self.client.keys_claim(missing)
+                    if cresp.__class__.__name__.endswith("Error"):
+                        print(f"[Matrix:{room_id}] keys_claim failed (attempt {attempt}): {cresp}")
+                    else:
+                        missing_pairs = self._missing_pairs_set(missing)
+                        claimed_pairs = self._extract_claimed_pairs(cresp)
+                        claimed_for_devices = len(claimed_pairs)
+                        unresolved_pairs = missing_pairs - claimed_pairs
+
+                        failures = getattr(cresp, "failures", {})
+                        if claimed_for_devices == 0:
+                            print(
+                                f"[Matrix:{room_id}] keys_claim returned no one-time keys "
+                                f"(attempt {attempt})."
+                            )
+                        else:
+                            print(
+                                f"[Matrix:{room_id}] keys_claim returned one-time keys for "
+                                f"{claimed_for_devices} device(s) (attempt {attempt})."
+                            )
+                        if unresolved_pairs:
+                            print(
+                                f"[Matrix:{room_id}] No one-time/fallback key available for: "
+                                f"{self._summarize_pair_set(unresolved_pairs)} (attempt {attempt})."
+                            )
+                        if isinstance(failures, dict) and failures:
+                            print(
+                                f"[Matrix:{room_id}] keys_claim failures (attempt {attempt}): "
+                                f"{failures}"
+                            )
+                except Exception as e:
+                    print(f"[Matrix:{room_id}] keys_claim exception (attempt {attempt}): {e}")
+
+                try:
+                    await self.client.send_to_device_messages()
+                except Exception as e:
+                    print(
+                        f"[Matrix:{room_id}] send_to_device_messages exception "
+                        f"(attempt {attempt}): {e}"
+                    )
+
+                missing_after = self.client.get_missing_sessions(room_id)
+                if not missing_after:
+                    break
+                await asyncio.sleep(0.2 * attempt)
+
+            if missing_after:
+                self.roomsWithMissingOlmSessions.add(room_id)
+                print(
+                    f"[Matrix:{room_id}] Still missing Olm sessions after retries: "
+                    f"{self._summarize_missing_sessions(missing_after)}"
+                )
+                # Force fresh Megolm sessions while we still have missing devices so
+                # newly-established Olm sessions can receive keys on later sends.
+                self._invalidate_outbound_group_session(room_id, "missing Olm sessions")
+            elif had_missing:
+                if room_id in self.roomsWithMissingOlmSessions:
+                    print(
+                        f"[Matrix:{room_id}] Missing Olm sessions recovered; re-sharing via "
+                        "a fresh outbound Megolm session."
+                    )
+                self.roomsWithMissingOlmSessions.discard(room_id)
+                self._invalidate_outbound_group_session(room_id, "Olm sessions recovered")
+
+            # Pre-share outbound group session when needed.
+            try:
+                assert self.client.olm is not None
+                if self.client.olm.should_share_group_session(room_id):
+                    sresp = await self.client.share_group_session(
+                        room_id,
+                        ignore_unverified_devices=True,
+                    )
+                    if sresp.__class__.__name__.endswith("Error"):
+                        print(f"[Matrix:{room_id}] share_group_session failed: {sresp}")
+            except LocalProtocolError:
+                pass
+            except Exception as e:
+                print(f"[Matrix:{room_id}] share_group_session exception: {e}")
+        except LocalProtocolError as e:
+            print(f"[Matrix:{room_id}] Encryption prep failed: {e}")
+        except Exception as e:
+            print(f"[Matrix:{room_id}] Unexpected encryption prep error: {e}")
 
     def _content_from_event(self, event: Any) -> dict[str, Any]:
         source = getattr(event, "source", None)
@@ -468,14 +821,19 @@ class MatrixBot:
         return None
 
     def _room_for_id(self, room_id: str) -> MatrixRoom | None:
-        cached = self.roomCache.get(room_id)
+        room_cache = getattr(self, "roomCache", None)
+        if not isinstance(room_cache, dict):
+            room_cache = {}
+            self.roomCache = room_cache
+
+        cached = room_cache.get(room_id)
         if cached is not None:
             return cached
         rooms = getattr(self.client, "rooms", None)
         if isinstance(rooms, dict):
             room = rooms.get(room_id)
             if room is not None:
-                self.roomCache[room_id] = room
+                room_cache[room_id] = room
                 return room
         return None
 
@@ -591,6 +949,8 @@ class MatrixBot:
             print(
                 f"[Matrix:{room_id}] Failed to request room key for session {session_id}: {e}"
             )
+
+        await self._refresh_e2ee_state(reason=f"undecrypted:{room_id}")
 
     def _append_recent_message(self, room_id: str, message: dict[str, Any]):
         existing = self.recentMessages.get(room_id)
@@ -1090,6 +1450,7 @@ class MatrixBot:
         formatted_body: str | None = None,
         mention_user_ids: Sequence[str] | None = None,
     ) -> str | None:
+        await self._prepare_room_encryption(room_id)
         content = build_text_content(body, formatted_body, mention_user_ids)
         try:
             response = await self.client.room_send(
@@ -1111,6 +1472,7 @@ class MatrixBot:
         formatted_body: str | None = None,
         mention_user_ids: Sequence[str] | None = None,
     ) -> str | None:
+        await self._prepare_room_encryption(room_id)
         content = build_edit_content(body, target_event_id, formatted_body, mention_user_ids)
         try:
             response = await self.client.room_send(
