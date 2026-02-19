@@ -30,7 +30,7 @@ from mautrix.client import Client
 from mautrix.client.state_store.memory import MemoryStateStore
 from mautrix.client.syncer import InternalEventType
 from mautrix.crypto import OlmMachine
-from mautrix.crypto.store.memory import MemoryCryptoStore
+from mautrix.crypto.store.asyncpg import PgCryptoStore
 from mautrix.types import (
     EventID,
     EventType,
@@ -39,6 +39,7 @@ from mautrix.types import (
     RoomID,
     UserID,
 )
+from mautrix.util.async_db import Database
 
 from .chat_image_utils import build_remote_image_record, download_image_to_history
 from .openai_inference import (
@@ -257,7 +258,8 @@ class MatrixBot:
     # Populated during __init__ / run()
     client: Client
     state_store: BotStateStore
-    crypto_store: MemoryCryptoStore
+    crypto_db: Database
+    crypto_store: PgCryptoStore
     crypto_machine: OlmMachine
 
     def __init__(self) -> None:
@@ -296,9 +298,18 @@ class MatrixBot:
 
         # Stores
         self.state_store = BotStateStore()
-        self.crypto_store = MemoryCryptoStore(
+
+        # Persistent crypto store (SQLite)
+        db_path = os.path.join(self.store_path, "crypto.db")
+        self.crypto_db = Database.create(
+            url=f"sqlite:{db_path}",
+            upgrade_table=PgCryptoStore.upgrade_table,
+        )
+        await self.crypto_db.start()
+        self.crypto_store = PgCryptoStore(
             account_id=self.bot_mxid,
             pickle_key="realbot_pickle_key",
+            db=self.crypto_db,
         )
 
         # Client
@@ -367,6 +378,8 @@ class MatrixBot:
             pass
         finally:
             self.client.stop()
+            if hasattr(self, "crypto_db"):
+                await self.crypto_db.stop()
 
     # ── session persistence ──────────────────────────────────────────
 
@@ -414,6 +427,9 @@ class MatrixBot:
         # Setting client.crypto auto-registers DecryptionDispatcher
         self.client.crypto = self.crypto_machine
         await self.crypto_machine.load()
+        # Upload device identity keys and one-time keys to the homeserver
+        # so other clients can discover us and share Megolm session keys.
+        await self.crypto_machine.share_keys()
         log.info("E2EE initialised (device %s)", self.device_id)
 
     # ── event handlers ───────────────────────────────────────────────
