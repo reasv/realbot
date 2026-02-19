@@ -3,8 +3,29 @@ always = []
 mentions = []
 rand = []
 
+[randomChat]
+engagement_chance = 10
+message_history_limit = 10
+min_chat_duration_seconds = 40
+max_chat_duration_seconds = 500
+min_downtime_minutes = 10
+max_downtime_minutes = 30
+respond_to_mentions = true
+ctx_len = 30
+
+
 [openai]
 # If stopping_strings_limit != -1, assistant messages are truncated after the
 # (stopping_strings_limit + 1)th "run" of one or more consecutive stopping strings.
 stopping_strings = ["\n"]
 stopping_strings_limit = -1
+
+[swipes]
+enabled = true
+auto_react_controls = true
+regen_emoji = "🔄"
+prev_emoji = "◀️"
+next_emoji = "▶️"
+user_whitelist = []
+channel_whitelist = []
+auto_react_channel_whitelist = []
