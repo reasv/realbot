@@ -860,6 +860,15 @@ class MatrixBot:
             else:
                 preview_candidates.append(url_str)
 
+        if all_urls:
+            log.info(
+                "[%s] Found %d URL(s): %d direct image, %d preview candidate(s)",
+                room_id,
+                len(all_urls),
+                len(direct_image_urls),
+                len(preview_candidates),
+            )
+
         # ── 2a. Direct image URLs -- download locally ────────────────────
         for img_url in direct_image_urls:
             if len(images) >= max_images:
@@ -898,10 +907,26 @@ class MatrixBot:
                 break
             previews_fetched += 1
             try:
+                log.info("[%s] Fetching link preview for %s", room_id, page_url)
                 preview = await self.client.get_url_preview(page_url)
                 og_image = getattr(preview, "image", None)
-                if og_image and getattr(og_image, "url", None):
-                    mxc_url = og_image.url
+                og_image_url = getattr(og_image, "url", None) if og_image else None
+                if og_image_url:
+                    log.info(
+                        "[%s] Preview has og:image %s (title: %s)",
+                        room_id,
+                        og_image_url,
+                        getattr(preview, "title", ""),
+                    )
+                    mxc_url = og_image_url
+                else:
+                    log.info(
+                        "[%s] Preview for %s has no og:image (title: %s)",
+                        room_id,
+                        page_url,
+                        getattr(preview, "title", ""),
+                    )
+                    continue
                     data = await self.client.download_media(mxc_url)
                     filename = "preview.jpg"
                     local = await download_image_to_history(
