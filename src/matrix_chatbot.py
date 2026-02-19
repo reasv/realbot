@@ -18,6 +18,7 @@ try:
     from nio import (
         AsyncClient,
         AsyncClientConfig,
+        LocalProtocolError,
         MatrixRoom,
         MegolmEvent,
         ReactionEvent,
@@ -29,6 +30,7 @@ try:
 except Exception:
     AsyncClient = None  # type: ignore
     AsyncClientConfig = None  # type: ignore
+    LocalProtocolError = Exception  # type: ignore
     MatrixRoom = Any  # type: ignore
     MegolmEvent = Any  # type: ignore
     ReactionEvent = Any  # type: ignore
@@ -331,9 +333,11 @@ class MatrixBot:
             store_path=self.store_path,
             config=config,
         )
-        self.client.access_token = self.access_token
-        self.client.user_id = self.user_id
-        self.client.device_id = self.device_id
+        # Ensure nio restores login + loads crypto store for this device.
+        self.client.restore_login(self.user_id, self.device_id, self.access_token)
+
+        self.import_keys_path = os.getenv("MATRIX_IMPORT_KEYS_PATH", "").strip()
+        self.import_keys_passphrase = os.getenv("MATRIX_IMPORT_KEYS_PASSWORD", "")
 
         self.pendingMessages = {}
         self.pendingSwipes = {}
@@ -341,6 +345,7 @@ class MatrixBot:
         self.recentMessages = {}
         self.roomMentionIndexCache = {}
         self.roomCache: dict[str, MatrixRoom] = {}
+        self.requestedMissingMegolmSessions: set[tuple[str, str, str]] = set()
         self.bg_task: asyncio.Task | None = None
 
         self.client.add_event_callback(self.on_room_message, RoomMessage)
@@ -365,6 +370,8 @@ class MatrixBot:
         return parsed if parsed > 0 else default
 
     async def run(self):
+        await self._verify_whoami()
+        await self._import_keys_if_configured()
         print(f"[Matrix] Starting sync as {self.user_id} on {self.homeserver}")
         await self.client.sync(timeout=self.sync_timeout_ms, full_state=True)
         print("[Matrix] Initial sync complete")
@@ -377,6 +384,51 @@ class MatrixBot:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self.bg_task
             await self.client.close()
+
+    async def _verify_whoami(self) -> None:
+        try:
+            response = await self.client.whoami()
+        except Exception as e:
+            print(f"[Matrix] Failed to call whoami: {e}")
+            return
+
+        if response.__class__.__name__.endswith("Error"):
+            print(f"[Matrix] whoami returned error: {response}")
+            return
+
+        actual_user_id = str(getattr(response, "user_id", "") or "")
+        actual_device_id = str(getattr(response, "device_id", "") or "")
+        if actual_user_id and actual_user_id != self.user_id:
+            print(
+                f"[Matrix] Warning: MATRIX_USER_ID ({self.user_id}) does not match token user "
+                f"({actual_user_id})."
+            )
+        if actual_device_id and actual_device_id != self.device_id:
+            print(
+                f"[Matrix] Warning: MATRIX_DEVICE_ID ({self.device_id}) does not match token device "
+                f"({actual_device_id})."
+            )
+
+    async def _import_keys_if_configured(self) -> None:
+        if not self.import_keys_path:
+            return
+        if not os.path.exists(self.import_keys_path):
+            print(
+                f"[Matrix] MATRIX_IMPORT_KEYS_PATH does not exist: {self.import_keys_path}"
+            )
+            return
+        if not self.import_keys_passphrase:
+            print(
+                "[Matrix] MATRIX_IMPORT_KEYS_PATH is set but MATRIX_IMPORT_KEYS_PASSWORD is empty."
+            )
+            return
+        try:
+            await self.client.import_keys(
+                self.import_keys_path, self.import_keys_passphrase
+            )
+            print(f"[Matrix] Imported room keys from {self.import_keys_path}")
+        except Exception as e:
+            print(f"[Matrix] Failed to import room keys: {e}")
 
     def _content_from_event(self, event: Any) -> dict[str, Any]:
         source = getattr(event, "source", None)
@@ -508,6 +560,37 @@ class MatrixBot:
             f"[Matrix:{room_id}] Received undecrypted event {event_id} from {sender}. "
             "This usually means missing E2EE room keys for this device/session."
         )
+
+        if not isinstance(event, MegolmEvent):
+            return
+
+        session_id = str(getattr(event, "session_id", "") or "")
+        sender_key = str(getattr(event, "sender_key", "") or "")
+        room_key = str(getattr(event, "room_id", "") or room_id)
+        cache_key = (room_key, sender_key, session_id)
+        if session_id and sender_key and cache_key in self.requestedMissingMegolmSessions:
+            return
+
+        try:
+            response = await self.client.request_room_key(event)
+            if session_id and sender_key:
+                self.requestedMissingMegolmSessions.add(cache_key)
+            if response.__class__.__name__.endswith("Error"):
+                print(
+                    f"[Matrix:{room_id}] Room key request failed for session {session_id}: "
+                    f"{response}"
+                )
+            else:
+                print(
+                    f"[Matrix:{room_id}] Requested missing room key for session {session_id}."
+                )
+        except LocalProtocolError:
+            if session_id and sender_key:
+                self.requestedMissingMegolmSessions.add(cache_key)
+        except Exception as e:
+            print(
+                f"[Matrix:{room_id}] Failed to request room key for session {session_id}: {e}"
+            )
 
     def _append_recent_message(self, room_id: str, message: dict[str, Any]):
         existing = self.recentMessages.get(room_id)

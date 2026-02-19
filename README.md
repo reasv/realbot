@@ -72,8 +72,16 @@ Matrix:
 - `MATRIX_DEVICE_ID`
 - `MATRIX_STORE_PATH` (default: `history/matrix_store`)
 - `MATRIX_SYNC_TIMEOUT_MS` (default: `30000`)
+- `MATRIX_IMPORT_KEYS_PATH` (optional, path to exported Megolm keys file)
+- `MATRIX_IMPORT_KEYS_PASSWORD` (optional, passphrase for imported keys)
 
 Matrix auth is token-based only. Room joins/invite acceptance are not handled by bot logic; join rooms externally with the bot account.
+
+If logs show `Received undecrypted event ...`, the device is missing room keys.
+You can either:
+- Verify this device and wait for new messages, or
+- Export E2EE room keys from another client (e.g. Element) and set
+  `MATRIX_IMPORT_KEYS_PATH` + `MATRIX_IMPORT_KEYS_PASSWORD` so the bot can import them on startup.
 
 ## Configuration
 
