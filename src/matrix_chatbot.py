@@ -588,10 +588,12 @@ class MatrixBot:
             self.recentMessages[room_id] = deque(maxlen=200)
         self.recentMessages[room_id].append(evt)
 
-        # Only respond to text-bearing messages
-        if msgtype not in (MessageType.TEXT, MessageType.EMOTE):
+        # Only respond to text-bearing messages and images
+        if msgtype == MessageType.IMAGE:
+            pass  # image-only messages are valid -- handled below
+        elif msgtype not in (MessageType.TEXT, MessageType.EMOTE):
             return
-        if not body or not body.strip():
+        elif not body or not body.strip():
             return
 
         # Serialise content for mention detection
@@ -737,7 +739,9 @@ class MatrixBot:
         room_id = str(evt.room_id)
         username = await self._get_display_name(room_id, str(evt.sender))
 
+        msgtype = getattr(evt.content, "msgtype", None)
         body = getattr(evt.content, "body", None) or ""
+
         cleaned = self._clean_content(body)
 
         processed: dict[str, Any] = {
@@ -749,6 +753,10 @@ class MatrixBot:
         images = await self._extract_images(evt)
         if images:
             processed["images"] = images
+            # LLMs like Claude error on image-only messages with no text,
+            # so ensure there is always *some* text content.
+            if not processed["message"]:
+                processed["message"] = "image.png"
 
         return processed
 
@@ -779,7 +787,7 @@ class MatrixBot:
         content = evt.content
         room_id = str(evt.room_id)
 
-        # m.image message type
+        # m.image message type -- download via Matrix media API and save locally
         msgtype = getattr(content, "msgtype", None)
         if msgtype == MessageType.IMAGE:
             url = getattr(content, "url", None)
@@ -788,7 +796,7 @@ class MatrixBot:
                 try:
                     data = await self.client.download_media(url)
                     local = await download_image_to_history(
-                        room_id, None, filename, data=data
+                        room_id, str(url), filename, data=data
                     )
                     images.append(
                         {
@@ -798,21 +806,41 @@ class MatrixBot:
                             "local_path": local,
                         }
                     )
-                except Exception:
-                    images.append(
-                        build_remote_image_record(str(url), source="matrix_image")
+                except Exception as exc:
+                    log.warning(
+                        "[%s] Failed to download m.image %s: %s",
+                        room_id,
+                        url,
+                        exc,
                     )
 
-        # Image URLs in text body
+        # Image URLs in text body -- download locally so they're base64-encoded
+        # for inference rather than relying on the model fetching them.
         body = getattr(content, "body", None) or ""
         url_re = re.compile(
             r"https?://\S+\.(?:png|jpg|jpeg|gif|webp)(?:\?\S*)?",
             re.IGNORECASE,
         )
         for match in url_re.finditer(body):
-            images.append(
-                build_remote_image_record(match.group(0), source="matrix_url")
-            )
+            img_url = match.group(0)
+            try:
+                local = await download_image_to_history(room_id, img_url)
+                images.append(
+                    {
+                        "source": "matrix_url",
+                        "url": img_url,
+                        "local_path": local,
+                    }
+                )
+            except Exception as exc:
+                log.warning(
+                    "[%s] Failed to download URL image %s: %s",
+                    room_id,
+                    img_url,
+                    exc,
+                )
+                # Fall back to remote-only record so inference can try the raw URL
+                images.append(build_remote_image_record(img_url, source="matrix_url"))
 
         return images
 

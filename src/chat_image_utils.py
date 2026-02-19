@@ -27,10 +27,18 @@ def sanitize_filename(filename: str, fallback_prefix: str = "image") -> str:
 
 
 async def download_image_to_history(
-    channel_id: int | str, url: str, filename: Optional[str] = None
+    channel_id: int | str,
+    url: str,
+    filename: Optional[str] = None,
+    data: Optional[bytes] = None,
 ) -> str:
     """
-    Downloads an image from `url` into the channel's history image directory.
+    Stores an image into the channel's history image directory.
+
+    If *data* is provided the bytes are written directly (useful when the
+    image has already been fetched, e.g. via a Matrix ``download_media``
+    call).  Otherwise the image is downloaded from *url* over HTTP.
+
     Returns the relative path to the stored file.
     """
     if not filename:
@@ -44,13 +52,22 @@ async def download_image_to_history(
         stem, ext = os.path.splitext(filename)
         target_path = os.path.join(directory, f"{stem}_{uuid.uuid4().hex}{ext}")
 
-    def _download():
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        with open(target_path, "wb") as f:
-            f.write(resp.content)
+    if data is not None:
 
-    await asyncio.to_thread(_download)
+        def _write():
+            with open(target_path, "wb") as f:
+                f.write(data)
+
+        await asyncio.to_thread(_write)
+    else:
+
+        def _download():
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            with open(target_path, "wb") as f:
+                f.write(resp.content)
+
+        await asyncio.to_thread(_download)
     return target_path
 
 
@@ -68,7 +85,9 @@ def load_image_as_data_url(path: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def is_supported_image_mime(content_type: Optional[str], filename: Optional[str] = None) -> bool:
+def is_supported_image_mime(
+    content_type: Optional[str], filename: Optional[str] = None
+) -> bool:
     """
     Returns True if the provided mime type or filename looks like an image we should process.
     """
@@ -80,7 +99,9 @@ def is_supported_image_mime(content_type: Optional[str], filename: Optional[str]
     return False
 
 
-def build_remote_image_record(url: str, source: str, description: Optional[str] = None) -> dict:
+def build_remote_image_record(
+    url: str, source: str, description: Optional[str] = None
+) -> dict:
     """
     Helper that returns the standard metadata structure for remote-only images.
     """
