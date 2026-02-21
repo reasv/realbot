@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 from typing import Any, Dict, List, Iterable
 import uuid
 import openai
@@ -82,6 +83,27 @@ def _strip_trailing_whitespace_stops(text: str, whitespace_stops: List[str]) -> 
                 break
         if not removed:
             return text
+
+
+def _strip_assistant_username_prefixes(text: str | None, username: str) -> str:
+    """
+    Remove model-added `username:` speaker labels from assistant text.
+    """
+    if not text or not username:
+        return text or ""
+
+    prefix_pattern = re.compile(rf"^{re.escape(username)}:\s*")
+
+    lines = text.splitlines(keepends=True)
+    non_empty_lines = [i for i, line in enumerate(lines) if line.strip()]
+    if len(non_empty_lines) >= 2 and all(prefix_pattern.match(lines[i]) for i in non_empty_lines):
+        for i in non_empty_lines:
+            lines[i] = prefix_pattern.sub("", lines[i], count=1)
+        text = "".join(lines)
+
+    while prefix_pattern.match(text):
+        text = prefix_pattern.sub("", text, count=1)
+    return text
 
 
 def truncate_message_by_stopping_strings(
@@ -276,9 +298,7 @@ async def _generate_reply_from_stored_messages(
         return None
 
     reply = result["message"]
-    if reply:
-        while reply.startswith(f"{username}: "):
-            reply = reply[len(f"{username}: "):]
+    reply = _strip_assistant_username_prefixes(reply, username)
 
     openai_cfg = config.get("openai", {})
     reply = truncate_message_by_stopping_strings(
@@ -314,9 +334,7 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
     save_channel_history(channelID, history)
 
     print(reply)
-    # Remove "username: " from the start of the message
-    if reply and reply.startswith(f"{username}: "):
-        reply = reply[len(f"{username}: "):]
+    reply = _strip_assistant_username_prefixes(reply, username)
     return (reply, pending_message_id)
 
 if __name__ == '__main__':
@@ -611,9 +629,7 @@ def build_openai_message(message: Dict[str, Any], username: str) -> Dict[str, An
     msg_content = msg_content.replace("{{char}}", username)
     role = "assistant" if msg_user == "{{char}}" else "user"
     if role == "assistant":
-        # strip username prefix if present
-        while msg_content.startswith(f"{username}: "):
-            msg_content = msg_content[len(f"{username}: "):]
+        msg_content = _strip_assistant_username_prefixes(msg_content, username)
         text_prefix = f"{username}: {msg_content}"
     else:
         text_prefix = f"{msg_user}: {msg_content}"

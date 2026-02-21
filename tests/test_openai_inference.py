@@ -82,3 +82,20 @@ class RunInferenceOverrideFileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake_create.await_count, 1)
         self.assertEqual(fake_create.await_args.kwargs["extra_body"], {})
+
+
+class UsernamePrefixStrippingTests(unittest.TestCase):
+    def test_strip_repeated_prefix_at_start(self):
+        text = "assistant: assistant: hello there"
+        stripped = openai_inference._strip_assistant_username_prefixes(text, "assistant")
+        self.assertEqual(stripped, "hello there")
+
+    def test_strip_prefix_on_each_non_empty_line_when_all_lines_match(self):
+        text = "assistant: line one\n\nassistant: line two\nassistant: line three"
+        stripped = openai_inference._strip_assistant_username_prefixes(text, "assistant")
+        self.assertEqual(stripped, "line one\n\nline two\nline three")
+
+    def test_keep_non_uniform_multiline_prefixes(self):
+        text = "assistant: line one\nbob: line two\nassistant: line three"
+        stripped = openai_inference._strip_assistant_username_prefixes(text, "assistant")
+        self.assertEqual(stripped, "line one\nbob: line two\nassistant: line three")
