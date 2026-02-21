@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+from collections import deque
 from unittest.mock import AsyncMock, patch
 import tempfile
 import os
@@ -272,8 +273,205 @@ class MatrixDmRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         bot._constant_chat.assert_not_awaited()
 
+    async def test_on_message_mentions_route_enables_neighbor_image_mode(self):
+        room_id = "!mentions:example.org"
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._initial_sync_done = True
+        bot.recentMessages = {}
+        bot._constant_chat = AsyncMock()
+        bot.state_store = type("StateStore", (), {})()
+        bot.state_store.members = {}
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "hey @bot",
+                "serialize": lambda self: {"body": "hey @bot"},
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {
+                "sender": "@alice:example.org",
+                "room_id": room_id,
+                "content": content,
+                "event_id": "$evt",
+            },
+        )()
+
+        cfg = {
+            "bot": {"respond_to_dms": False},
+            "whitelist": {"always": [], "mentions": [room_id], "rand": []},
+        }
+        with patch("src.matrix_chatbot.get_config", return_value=cfg):
+            await bot._on_message(evt)
+
+        bot._constant_chat.assert_awaited_once_with(
+            room_id, evt, include_mention_mode_neighbor_images=True
+        )
+
 
 class MatrixReplyContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_process_message_mentions_mode_adds_nearby_same_sender_image(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._get_display_name = AsyncMock(return_value="Alice")  # type: ignore
+        bot._extract_images = AsyncMock(return_value=([], []))  # type: ignore
+        bot._extract_reply_context = AsyncMock(return_value=(None, []))  # type: ignore
+
+        def mk_event(event_id: str, sender: str, ts: int, msgtype: MessageType, body: str):
+            content = type(
+                "Content",
+                (),
+                {
+                    "msgtype": msgtype,
+                    "body": body,
+                    "serialize": lambda self: {"body": body},
+                },
+            )()
+            return type(
+                "Event",
+                (),
+                {
+                    "sender": sender,
+                    "room_id": "!room:example.org",
+                    "event_id": event_id,
+                    "timestamp": ts,
+                    "content": content,
+                },
+            )()
+
+        before_image_evt = mk_event(
+            "$before-image",
+            "@alice:example.org",
+            9700,
+            MessageType.IMAGE,
+            "before.png",
+        )
+        before_other_evt = mk_event(
+            "$before-other",
+            "@bob:example.org",
+            9800,
+            MessageType.TEXT,
+            "noise",
+        )
+        target_evt = mk_event(
+            "$target",
+            "@alice:example.org",
+            10000,
+            MessageType.TEXT,
+            "ping @bot",
+        )
+        after_other_evt = mk_event(
+            "$after-other",
+            "@bob:example.org",
+            15500,
+            MessageType.TEXT,
+            "later noise",
+        )
+        after_image_evt = mk_event(
+            "$after-image",
+            "@alice:example.org",
+            15600,
+            MessageType.IMAGE,
+            "after.png",
+        )
+
+        bot.recentMessages = {
+            "!room:example.org": deque(
+                [
+                    before_image_evt,
+                    before_other_evt,
+                    target_evt,
+                    after_other_evt,
+                    after_image_evt,
+                ],
+                maxlen=200,
+            )
+        }
+
+        async def fake_extract_event_images(evt, _room_id, source):
+            if str(getattr(evt, "event_id", "")) == "$before-image":
+                return (
+                    [
+                        {
+                            "source": source,
+                            "url": "mxc://hs/before",
+                            "filename": "before.png",
+                        }
+                    ],
+                    ["before.png"],
+                )
+            if str(getattr(evt, "event_id", "")) == "$after-image":
+                return (
+                    [
+                        {
+                            "source": source,
+                            "url": "mxc://hs/after",
+                            "filename": "after.png",
+                        }
+                    ],
+                    ["after.png"],
+                )
+            return ([], [])
+
+        bot._extract_event_images = fake_extract_event_images  # type: ignore
+
+        with patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}):
+            msg = await bot._process_message(
+                target_evt, include_mention_mode_neighbor_images=True
+            )
+
+        self.assertTrue(msg["message"].startswith("[Adjacent Image Context - Before]"))
+        self.assertIn("Image Filename(s): before.png", msg["message"])
+        self.assertNotIn("[Adjacent Image Context - After]", msg["message"])
+        self.assertEqual(len(msg.get("images", [])), 1)
+        self.assertEqual(msg["images"][0]["source"], "matrix_mentions_neighbor_before")
+
+    async def test_process_message_without_mentions_mode_skips_neighbor_image_scan(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._get_display_name = AsyncMock(return_value="Alice")  # type: ignore
+        bot._extract_images = AsyncMock(return_value=([], []))  # type: ignore
+        bot._extract_reply_context = AsyncMock(return_value=(None, []))  # type: ignore
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "ping @bot",
+                "serialize": lambda self: {"body": "ping @bot"},
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {
+                "sender": "@alice:example.org",
+                "room_id": "!room:example.org",
+                "event_id": "$target",
+                "timestamp": 10000,
+                "content": content,
+            },
+        )()
+        bot.recentMessages = {"!room:example.org": deque([evt], maxlen=200)}
+
+        with patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}):
+            msg = await bot._process_message(
+                evt, include_mention_mode_neighbor_images=False
+            )
+
+        self.assertEqual(msg["message"], "ping {{char}}")
+        self.assertNotIn("images", msg)
+
     async def test_process_message_places_reply_context_after_link_previews(self):
         bot = MatrixBot.__new__(MatrixBot)
         bot.bot_mxid = "@bot:example.org"

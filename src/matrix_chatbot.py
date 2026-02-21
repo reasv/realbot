@@ -256,6 +256,30 @@ def _serialize_event_content(content: Any) -> dict[str, Any]:
     return {}
 
 
+def _event_timestamp_ms(evt: Any) -> int | None:
+    for attr in ("timestamp", "origin_server_ts", "server_timestamp"):
+        value = getattr(evt, attr, None)
+        if isinstance(value, (int, float)):
+            return int(value)
+
+    source = getattr(evt, "source", None)
+    if isinstance(source, dict):
+        value = source.get("origin_server_ts")
+        if isinstance(value, (int, float)):
+            return int(value)
+
+    if hasattr(evt, "serialize"):
+        try:
+            serialized = evt.serialize()
+            if isinstance(serialized, dict):
+                value = serialized.get("origin_server_ts")
+                if isinstance(value, (int, float)):
+                    return int(value)
+        except Exception:
+            return None
+    return None
+
+
 # ── State store with crypto-side find_shared_rooms ───────────────────
 
 
@@ -711,7 +735,9 @@ class MatrixBot:
             return await self._constant_chat(room_id, evt)
 
         if is_mentioned and _is_whitelisted(room_id, "mentions"):
-            return await self._constant_chat(room_id, evt)
+            return await self._constant_chat(
+                room_id, evt, include_mention_mode_neighbor_images=True
+            )
 
         if _is_whitelisted(room_id, "rand"):
             log.debug(
@@ -830,8 +856,12 @@ class MatrixBot:
 
     # ── chat behaviours ──────────────────────────────────────────────
 
-    async def _constant_chat(self, room_id: str, evt: Any) -> None:
-        msg = await self._process_message(evt)
+    async def _constant_chat(
+        self, room_id: str, evt: Any, include_mention_mode_neighbor_images: bool = False
+    ) -> None:
+        msg = await self._process_message(
+            evt, include_mention_mode_neighbor_images=include_mention_mode_neighbor_images
+        )
         self._add_to_queue(room_id, msg)
 
     async def _random_chat(
@@ -916,7 +946,9 @@ class MatrixBot:
 
     # ── message processing ───────────────────────────────────────────
 
-    async def _process_message(self, evt: Any) -> dict:
+    async def _process_message(
+        self, evt: Any, include_mention_mode_neighbor_images: bool = False
+    ) -> dict:
         room_id = str(evt.room_id)
         username = await self._get_display_name(room_id, str(evt.sender))
 
@@ -932,6 +964,27 @@ class MatrixBot:
             "messageId": str(evt.event_id),
         }
 
+        neighbor_prefix: str | None = None
+        neighbor_suffix: str | None = None
+        neighbor_images: list[dict] = []
+        if include_mention_mode_neighbor_images:
+            (
+                neighbor_prefix,
+                neighbor_suffix,
+                neighbor_images,
+            ) = await self._extract_mentions_mode_neighbor_images(evt)
+
+            if neighbor_prefix:
+                if processed["message"]:
+                    processed["message"] = f"{neighbor_prefix}\n\n{processed['message']}"
+                else:
+                    processed["message"] = neighbor_prefix
+            if neighbor_suffix:
+                if processed["message"]:
+                    processed["message"] += f"\n\n{neighbor_suffix}"
+                else:
+                    processed["message"] = neighbor_suffix
+
         images, link_previews = await self._extract_images(evt)
         reply_context, reply_images = await self._extract_reply_context(
             evt, reply_to_event_id
@@ -939,6 +992,10 @@ class MatrixBot:
 
         max_images = int(get_config().get("matrix", {}).get("max_images_per_message", 5))
         all_images: list[dict] = list(images)
+        for img in neighbor_images:
+            if len(all_images) >= max_images:
+                break
+            all_images.append(img)
         for img in reply_images:
             if len(all_images) >= max_images:
                 break
@@ -984,6 +1041,125 @@ class MatrixBot:
                 processed["message"] = reply_context
 
         return processed
+
+    async def _extract_mentions_mode_neighbor_images(
+        self, evt: Any
+    ) -> tuple[str | None, str | None, list[dict]]:
+        """Gather nearby same-sender image events around a mentions-triggered message.
+
+        Returns ``(prepend_text, append_text, images)`` where prepend/appended text
+        is derived from the nearest same-sender message before/after within 5 seconds.
+        """
+        room_id = str(evt.room_id)
+        recent = list(self.recentMessages.get(room_id, []))
+        if not recent:
+            return None, None, []
+
+        event_id = str(getattr(evt, "event_id", "") or "")
+        idx = -1
+        for i, candidate in enumerate(recent):
+            candidate_event_id = str(getattr(candidate, "event_id", "") or "")
+            if candidate is evt or (event_id and candidate_event_id == event_id):
+                idx = i
+        if idx < 0:
+            return None, None, []
+
+        anchor_sender = str(getattr(evt, "sender", "") or "")
+        anchor_ts = _event_timestamp_ms(evt)
+
+        before_evt = self._find_nearest_same_sender_neighbor_event(
+            recent=recent,
+            anchor_idx=idx,
+            direction=-1,
+            sender=anchor_sender,
+            anchor_timestamp_ms=anchor_ts,
+            max_delta_ms=5000,
+        )
+        after_evt = self._find_nearest_same_sender_neighbor_event(
+            recent=recent,
+            anchor_idx=idx,
+            direction=1,
+            sender=anchor_sender,
+            anchor_timestamp_ms=anchor_ts,
+            max_delta_ms=5000,
+        )
+
+        prepend: str | None = None
+        append: str | None = None
+        collected_images: list[dict] = []
+
+        if before_evt is not None:
+            before_images, before_filenames = await self._extract_event_images(
+                before_evt, room_id, source="matrix_mentions_neighbor_before"
+            )
+            if before_images:
+                collected_images.extend(before_images)
+                prepend = self._build_neighbor_image_context_block(
+                    before_evt,
+                    label="Before",
+                    filenames=before_filenames,
+                )
+
+        if after_evt is not None:
+            after_images, after_filenames = await self._extract_event_images(
+                after_evt, room_id, source="matrix_mentions_neighbor_after"
+            )
+            if after_images:
+                collected_images.extend(after_images)
+                append = self._build_neighbor_image_context_block(
+                    after_evt,
+                    label="After",
+                    filenames=after_filenames,
+                )
+
+        return prepend, append, collected_images
+
+    def _find_nearest_same_sender_neighbor_event(
+        self,
+        recent: list[Any],
+        anchor_idx: int,
+        direction: int,
+        sender: str,
+        anchor_timestamp_ms: int | None,
+        max_delta_ms: int,
+    ) -> Any | None:
+        idx = anchor_idx + direction
+        first_step = True
+        while 0 <= idx < len(recent):
+            candidate = recent[idx]
+            candidate_sender = str(getattr(candidate, "sender", "") or "")
+            candidate_ts = _event_timestamp_ms(candidate)
+
+            if anchor_timestamp_ms is not None and candidate_ts is not None:
+                delta_ms = abs(anchor_timestamp_ms - candidate_ts)
+                if delta_ms > max_delta_ms:
+                    return None
+                if delta_ms == max_delta_ms and candidate_sender != sender:
+                    return None
+            elif not first_step and candidate_sender != sender:
+                # Without timestamps, do not drift too far through unrelated events.
+                return None
+
+            if candidate_sender == sender:
+                return candidate
+
+            idx += direction
+            first_step = False
+        return None
+
+    def _build_neighbor_image_context_block(
+        self, evt: Any, label: str, filenames: list[str]
+    ) -> str:
+        content = getattr(evt, "content", None)
+        body = getattr(content, "body", None) or ""
+        message_text = self._clean_content(str(body)).strip()
+
+        lines = [f"[Adjacent Image Context - {label}]"]
+        if message_text:
+            lines.append(f"Message: {message_text}")
+        if filenames:
+            lines.append("Image Filename(s): " + ", ".join(filenames))
+        return "\n".join(lines)
 
     def _reply_to_event_id_from_event(self, evt: Any) -> str | None:
         content = _serialize_event_content(getattr(evt, "content", None))
