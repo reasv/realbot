@@ -825,7 +825,8 @@ class MatrixBot:
         """Replace @bot-alias mentions with ``{{char}}``."""
         for alias in self._aliases:
             text = re.sub(
-                rf"(?<!\w)@?{re.escape(alias)}(?!\w)",
+                # Also consume Matrix-style homeserver suffixes (e.g. @bot:example.org).
+                rf"(?<!\w)@?{re.escape(alias)}(?::[A-Za-z0-9.-]+(?::\d+)?)?(?!\w)",
                 "{{char}}",
                 text,
                 flags=re.IGNORECASE,

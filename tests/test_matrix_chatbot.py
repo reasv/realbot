@@ -52,6 +52,20 @@ class MatrixMentionTests(unittest.TestCase):
         self.assertIsNone(formatted2)
         self.assertEqual(mentions2, [])
 
+    def test_clean_content_replaces_matrix_mxid_mention(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot._aliases = ["assistant"]
+
+        cleaned = bot._clean_content("@assistant:bernkastel.pictures blah blah blah")
+        self.assertEqual(cleaned, "{{char}} blah blah blah")
+
+    def test_clean_content_keeps_plain_colon_punctuation(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot._aliases = ["assistant"]
+
+        cleaned = bot._clean_content("hey @assistant: can you check")
+        self.assertEqual(cleaned, "hey {{char}}: can you check")
+
 
 class MatrixSwipeTests(unittest.TestCase):
     def test_reaction_to_swipe_mapping(self):
