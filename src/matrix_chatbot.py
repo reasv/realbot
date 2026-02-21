@@ -352,8 +352,14 @@ class MatrixBot:
         self.pendingSwipes: dict[str, list[tuple[str, str]]] = {}
         self._inflight_rooms: set[str] = set()
         self._inflight_tasks: dict[str, asyncio.Task[None]] = {}
-        self._typing_timeout_ms: int = 30000
-        self._typing_refresh_seconds: float = 20.0
+        matrix_cfg = get_config().get("matrix", {}) or {}
+        self._typing_timeout_ms: int = max(
+            int(matrix_cfg.get("typing_timeout_ms", 15000)), 1000
+        )
+        self._typing_refresh_seconds: float = max(
+            float(matrix_cfg.get("typing_refresh_seconds", 3.0)), 0.1
+        )
+        self._typing_error_last_log_at: dict[str, float] = {}
         self.randomChats: dict[str, RandomChat] = {}
         self.recentMessages: dict[str, deque] = {}
         self._direct_rooms: set[str] = set()
@@ -1509,11 +1515,22 @@ class MatrixBot:
         try:
             timeout = self._typing_timeout_ms if typing else 0
             await self.client.set_typing(RoomID(room_id), timeout=timeout)
-        except Exception:
-            pass
+        except Exception as exc:
+            now = time.monotonic()
+            error_log = getattr(self, "_typing_error_last_log_at", None)
+            if not isinstance(error_log, dict):
+                error_log = {}
+                self._typing_error_last_log_at = error_log
+            last = error_log.get(room_id, 0.0)
+            if now - last >= 60:
+                error_log[room_id] = now
+                log.warning("[%s] set_typing failed: %s", room_id, exc)
 
     async def _typing_keepalive(self, room_id: str) -> None:
-        interval = max(float(getattr(self, "_typing_refresh_seconds", 20.0)), 0.1)
+        configured = max(float(getattr(self, "_typing_refresh_seconds", 3.0)), 0.1)
+        timeout_s = max(float(getattr(self, "_typing_timeout_ms", 15000)) / 1000.0, 0.1)
+        # Always refresh comfortably before expiry, even with aggressive server clamps.
+        interval = min(configured, max(timeout_s * 0.6, 0.1))
         while True:
             await asyncio.sleep(interval)
             await self._set_typing(room_id, True)

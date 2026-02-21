@@ -52,3 +52,7 @@ auto_react_channel_whitelist = []
 max_preview_links = 3
 # Total images considered per message (attachments + direct URLs + previews)
 max_images_per_message = 5
+# Typing indicator timeout sent to homeserver (milliseconds)
+typing_timeout_ms = 15000
+# How often to refresh typing while generation is running (seconds)
+typing_refresh_seconds = 3.0
