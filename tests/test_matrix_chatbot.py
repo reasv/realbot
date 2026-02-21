@@ -798,6 +798,92 @@ class MatrixReplyContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images[0]["source"], "matrix_reply")
         self.assertEqual(images[0]["filename"], "look.png")
 
+    async def test_extract_reply_context_decrypts_fetched_encrypted_reply(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+
+        async def fake_get_member(_self, _room_id, user_id):
+            if str(user_id) == "@bob:example.org":
+                return type("Member", (), {"displayname": "Bob"})()
+            return None
+
+        bot.state_store = type("StateStore", (), {"get_member": fake_get_member})()
+        bot.recentMessages = {"!room:example.org": deque([], maxlen=200)}
+
+        encrypted_reply_evt = type(
+            "EncryptedReplyEvent",
+            (),
+            {
+                "event_id": "$parent",
+                "room_id": "!room:example.org",
+                "source": {
+                    "type": "m.room.encrypted",
+                    "content": {"session_id": "sess-1"},
+                    "sender": "@bob:example.org",
+                },
+                "content": {"session_id": "sess-1"},
+            },
+        )()
+        decrypted_content = type(
+            "DecryptedContent",
+            (),
+            {"msgtype": MessageType.IMAGE, "body": "secret.png", "url": "mxc://hs/secret"},
+        )()
+        decrypted_reply_evt = type(
+            "DecryptedReplyEvent",
+            (),
+            {
+                "event_id": "$parent",
+                "room_id": "!room:example.org",
+                "sender": "@bob:example.org",
+                "content": decrypted_content,
+            },
+        )()
+
+        bot.client = type("Client", (), {})()
+        bot.client.get_event = AsyncMock(return_value=encrypted_reply_evt)
+        bot.client.download_media = AsyncMock(return_value=b"img-bytes")
+        bot.client.crypto = type("Crypto", (), {})()
+        bot.client.crypto.decrypt_megolm_event = AsyncMock(return_value=decrypted_reply_evt)
+        bot.client.crypto.wait_for_session = AsyncMock(return_value=True)
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "replying",
+                "serialize": lambda self: {
+                    "body": "replying",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": "!room:example.org", "content": content},
+        )()
+
+        with patch(
+            "src.matrix_chatbot.download_image_to_history",
+            new=AsyncMock(return_value="history/images/reply/secret.png"),
+        ):
+            section, images = await bot._extract_reply_context(evt)
+
+        bot.client.get_event.assert_awaited_once_with("!room:example.org", "$parent")
+        bot.client.crypto.decrypt_megolm_event.assert_awaited_once_with(encrypted_reply_evt)
+        bot.client.download_media.assert_awaited_once_with("mxc://hs/secret")
+        self.assertIsNotNone(section)
+        assert section is not None
+        self.assertIn("[Reply Context]", section)
+        self.assertIn("From: Bob", section)
+        self.assertIn("Replied Message Image Filename(s): secret.png", section)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["source"], "matrix_reply")
+        self.assertEqual(images[0]["filename"], "secret.png")
+
     async def test_process_message_preserves_quoted_reply_text(self):
         bot = MatrixBot.__new__(MatrixBot)
         bot.bot_mxid = "@bot:example.org"

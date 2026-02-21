@@ -1254,6 +1254,64 @@ class MatrixBot:
                 return candidate
         return None
 
+    async def _maybe_decrypt_event(self, evt: Any, room_id: str) -> Any:
+        source = getattr(evt, "source", None)
+        event_type = ""
+        if isinstance(source, dict):
+            event_type = str(source.get("type", "") or "")
+        if not event_type:
+            event_type = str(getattr(evt, "type", "") or "")
+        if event_type != "m.room.encrypted":
+            return evt
+
+        crypto = getattr(getattr(self, "client", None), "crypto", None)
+        if crypto is None:
+            return evt
+
+        try:
+            return await crypto.decrypt_megolm_event(evt)
+        except Exception as first_err:
+            content = _event_content_dict(evt)
+            session_id = content.get("session_id") if isinstance(content, dict) else None
+            if not isinstance(session_id, str) or not session_id:
+                log.debug(
+                    "[%s] Failed to decrypt replied event %s (no session id): %s",
+                    room_id,
+                    str(getattr(evt, "event_id", "") or ""),
+                    first_err,
+                )
+                return evt
+
+            room_for_wait = getattr(evt, "room_id", None)
+            if not room_for_wait:
+                room_for_wait = RoomID(room_id)
+            try:
+                arrived = await crypto.wait_for_session(
+                    room_for_wait, session_id, timeout=5
+                )
+            except Exception:
+                arrived = False
+
+            if not arrived:
+                log.debug(
+                    "[%s] Session %s not available for replied event %s",
+                    room_id,
+                    session_id,
+                    str(getattr(evt, "event_id", "") or ""),
+                )
+                return evt
+
+            try:
+                return await crypto.decrypt_megolm_event(evt)
+            except Exception as retry_err:
+                log.debug(
+                    "[%s] Failed to decrypt replied event %s after session wait: %s",
+                    room_id,
+                    str(getattr(evt, "event_id", "") or ""),
+                    retry_err,
+                )
+                return evt
+
     async def _extract_reply_context(
         self, evt: Any, reply_to_event_id: str | None = None
     ) -> tuple[str | None, list[dict]]:
@@ -1276,6 +1334,8 @@ class MatrixBot:
                     exc,
                 )
                 return None, []
+
+        replied_evt = await self._maybe_decrypt_event(replied_evt, room_id)
 
         source = getattr(replied_evt, "source", None)
         sender_id = str(getattr(replied_evt, "sender", "") or "")
