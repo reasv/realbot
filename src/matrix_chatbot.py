@@ -243,6 +243,19 @@ def _clean_response(resp: str) -> str:
     return dequote(html.unescape(resp).strip())
 
 
+def _serialize_event_content(content: Any) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+    if hasattr(content, "serialize"):
+        try:
+            serialized = content.serialize()
+            if isinstance(serialized, dict):
+                return serialized
+        except Exception:
+            return {}
+    return {}
+
+
 # ── State store with crypto-side find_shared_rooms ───────────────────
 
 
@@ -909,6 +922,7 @@ class MatrixBot:
 
         msgtype = getattr(evt.content, "msgtype", None)
         body = getattr(evt.content, "body", None) or ""
+        reply_to_event_id = self._reply_to_event_id_from_event(evt)
 
         cleaned = self._clean_content(body)
 
@@ -919,8 +933,19 @@ class MatrixBot:
         }
 
         images, link_previews = await self._extract_images(evt)
-        if images:
-            processed["images"] = images
+        reply_context, reply_images = await self._extract_reply_context(
+            evt, reply_to_event_id
+        )
+
+        max_images = int(get_config().get("matrix", {}).get("max_images_per_message", 5))
+        all_images: list[dict] = list(images)
+        for img in reply_images:
+            if len(all_images) >= max_images:
+                break
+            all_images.append(img)
+
+        if all_images:
+            processed["images"] = all_images
             # LLMs like Claude error on image-only messages with no text,
             # so ensure there is always *some* text content.
             if not processed["message"]:
@@ -952,7 +977,129 @@ class MatrixBot:
                 block = "\n".join(lines)
                 processed["message"] += f"\n\n[Link Previews]\n{block}"
 
+        if reply_context:
+            if processed["message"]:
+                processed["message"] += f"\n\n{reply_context}"
+            else:
+                processed["message"] = reply_context
+
         return processed
+
+    def _reply_to_event_id_from_event(self, evt: Any) -> str | None:
+        content = _serialize_event_content(getattr(evt, "content", None))
+        relates_to = content.get("m.relates_to")
+        if isinstance(relates_to, dict):
+            in_reply_to = relates_to.get("m.in_reply_to") or relates_to.get("in_reply_to")
+            if isinstance(in_reply_to, dict):
+                event_id = in_reply_to.get("event_id")
+                if event_id:
+                    return str(event_id)
+
+        content_obj = getattr(evt, "content", None)
+        relates_obj = getattr(content_obj, "relates_to", None)
+        in_reply_obj = getattr(relates_obj, "in_reply_to", None)
+        event_id_obj = getattr(in_reply_obj, "event_id", None)
+        if event_id_obj:
+            return str(event_id_obj)
+        return None
+
+    async def _extract_reply_context(
+        self, evt: Any, reply_to_event_id: str | None = None
+    ) -> tuple[str | None, list[dict]]:
+        room_id = str(evt.room_id)
+        target_event_id = reply_to_event_id or self._reply_to_event_id_from_event(evt)
+        if not target_event_id:
+            return None, []
+
+        try:
+            replied_evt = await self.client.get_event(
+                RoomID(room_id), EventID(target_event_id)
+            )
+        except Exception as exc:
+            log.warning(
+                "[%s] Failed to fetch replied event %s: %s",
+                room_id,
+                target_event_id,
+                exc,
+            )
+            return None, []
+
+        sender_id = str(getattr(replied_evt, "sender", "") or "")
+        sender_name = sender_id or "unknown"
+        if sender_id:
+            try:
+                sender_name = await self._get_display_name(room_id, sender_id)
+            except Exception:
+                pass
+
+        reply_content = getattr(replied_evt, "content", None)
+        reply_body = getattr(reply_content, "body", None) or ""
+        reply_text = self._clean_content(reply_body).strip() or "(no text)"
+
+        reply_images, reply_filenames = await self._extract_event_images(
+            replied_evt, room_id, source="matrix_reply"
+        )
+
+        lines = [
+            "[Reply Context]",
+            "The message above is replying to this previous message:",
+            f"From: {sender_name}",
+            f"Message: {reply_text}",
+        ]
+        if reply_filenames:
+            lines.append(
+                "Replied Message Image Filename(s): " + ", ".join(reply_filenames)
+            )
+
+        return "\n".join(lines), reply_images
+
+    async def _extract_event_images(
+        self, evt: Any, room_id: str, source: str
+    ) -> tuple[list[dict], list[str]]:
+        content = getattr(evt, "content", None)
+        msgtype = getattr(content, "msgtype", None)
+        if msgtype != MessageType.IMAGE:
+            return [], []
+
+        url = getattr(content, "url", None)
+        enc_file = getattr(content, "file", None)
+        filename = getattr(content, "body", "image.png") or "image.png"
+        media_url = url or (enc_file.url if enc_file else None)
+        filenames = [filename]
+        if not media_url:
+            return [], filenames
+
+        try:
+            data = await self.client.download_media(media_url)
+            if enc_file and not url:
+                data = decrypt_attachment(
+                    data,
+                    enc_file.key.key,
+                    enc_file.hashes["sha256"],
+                    enc_file.iv,
+                )
+            local = await download_image_to_history(
+                room_id, str(media_url), filename, data=data
+            )
+            images = [
+                {
+                    "source": source,
+                    "url": str(media_url),
+                    "filename": filename,
+                    "local_path": local,
+                }
+            ]
+            return images, filenames
+        except Exception as exc:
+            log.warning(
+                "[%s] Failed to download %s image %s: %s",
+                room_id,
+                source,
+                media_url,
+                exc,
+            )
+            images = [{"source": source, "url": str(media_url), "filename": filename}]
+            return images, filenames
 
     async def _get_display_name(self, room_id: str, user_id: str) -> str:
         if user_id == self.bot_mxid:

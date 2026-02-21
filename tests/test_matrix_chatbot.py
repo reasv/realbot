@@ -273,6 +273,169 @@ class MatrixDmRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot._constant_chat.assert_not_awaited()
 
 
+class MatrixReplyContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_process_message_places_reply_context_after_link_previews(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._get_display_name = AsyncMock(return_value="Alice")  # type: ignore
+        bot._extract_images = AsyncMock(  # type: ignore
+            return_value=(
+                [],
+                [{"url": "https://example.org", "title": "Title", "description": "Desc"}],
+            )
+        )
+        bot._extract_reply_context = AsyncMock(  # type: ignore
+            return_value=(
+                "\n".join(
+                    [
+                        "[Reply Context]",
+                        "The message above is replying to this previous message:",
+                        "From: Bob",
+                        "Message: hi",
+                    ]
+                ),
+                [],
+            )
+        )
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "hello",
+                "serialize": lambda self: {
+                    "body": "hello",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {
+                "sender": "@alice:example.org",
+                "room_id": "!room:example.org",
+                "event_id": "$evt",
+                "content": content,
+            },
+        )()
+
+        with patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}):
+            msg = await bot._process_message(evt)
+
+        text = msg["message"]
+        self.assertIn("[Link Previews]", text)
+        self.assertIn("[Reply Context]", text)
+        self.assertLess(text.index("[Link Previews]"), text.index("[Reply Context]"))
+
+    async def test_extract_reply_context_fetches_parent_and_attaches_image(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+
+        async def fake_get_member(_self, _room_id, user_id):
+            if str(user_id) == "@bob:example.org":
+                return type("Member", (), {"displayname": "Bob"})()
+            return None
+
+        bot.state_store = type("StateStore", (), {"get_member": fake_get_member})()
+
+        replied_content = type(
+            "ReplyContent",
+            (),
+            {"msgtype": MessageType.IMAGE, "body": "cat.png", "url": "mxc://hs/cat"},
+        )()
+        replied_evt = type(
+            "ReplyEvent",
+            (),
+            {"sender": "@bob:example.org", "content": replied_content},
+        )()
+        bot.client = type("Client", (), {})()
+        bot.client.get_event = AsyncMock(return_value=replied_evt)
+        bot.client.download_media = AsyncMock(return_value=b"img-bytes")
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "ok",
+                "serialize": lambda self: {
+                    "body": "ok",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {
+                "sender": "@alice:example.org",
+                "room_id": "!room:example.org",
+                "event_id": "$evt",
+                "content": content,
+            },
+        )()
+
+        with patch(
+            "src.matrix_chatbot.download_image_to_history",
+            new=AsyncMock(return_value="history/images/reply/cat.png"),
+        ):
+            section, images = await bot._extract_reply_context(evt)
+
+        bot.client.get_event.assert_awaited_once_with("!room:example.org", "$parent")
+        bot.client.download_media.assert_awaited_once_with("mxc://hs/cat")
+        self.assertIsNotNone(section)
+        assert section is not None
+        self.assertIn("[Reply Context]", section)
+        self.assertIn("From: Bob", section)
+        self.assertIn("Message: cat.png", section)
+        self.assertIn("Replied Message Image Filename(s): cat.png", section)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["source"], "matrix_reply")
+        self.assertEqual(images[0]["filename"], "cat.png")
+
+    async def test_process_message_preserves_quoted_reply_text(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._get_display_name = AsyncMock(return_value="Alice")  # type: ignore
+        bot._extract_images = AsyncMock(return_value=([], []))  # type: ignore
+        bot._extract_reply_context = AsyncMock(return_value=(None, []))  # type: ignore
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "> <@bob:example.org> old message\n\nnew reply only",
+                "serialize": lambda self: {
+                    "body": "> <@bob:example.org> old message\n\nnew reply only",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {
+                "sender": "@alice:example.org",
+                "room_id": "!room:example.org",
+                "event_id": "$evt",
+                "content": content,
+            },
+        )()
+
+        with patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}):
+            msg = await bot._process_message(evt)
+
+        self.assertEqual(
+            msg["message"], "> <@bob:example.org> old message\n\nnew reply only"
+        )
+
+
 class MatrixInviteFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_room_member_invite_for_bot_uses_join_fallback(self):
         bot = MatrixBot.__new__(MatrixBot)
