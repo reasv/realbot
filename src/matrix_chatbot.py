@@ -1240,6 +1240,20 @@ class MatrixBot:
             return str(event_id_obj)
         return None
 
+    def _recent_event_by_id(self, room_id: str, event_id: str) -> Any | None:
+        recent_by_room = getattr(self, "recentMessages", {})
+        if not isinstance(recent_by_room, dict):
+            return None
+        recent = recent_by_room.get(room_id)
+        if not recent:
+            return None
+        target = str(event_id)
+        for candidate in reversed(list(recent)):
+            candidate_event_id = str(getattr(candidate, "event_id", "") or "")
+            if candidate_event_id == target:
+                return candidate
+        return None
+
     async def _extract_reply_context(
         self, evt: Any, reply_to_event_id: str | None = None
     ) -> tuple[str | None, list[dict]]:
@@ -1248,18 +1262,20 @@ class MatrixBot:
         if not target_event_id:
             return None, []
 
-        try:
-            replied_evt = await self.client.get_event(
-                RoomID(room_id), EventID(target_event_id)
-            )
-        except Exception as exc:
-            log.warning(
-                "[%s] Failed to fetch replied event %s: %s",
-                room_id,
-                target_event_id,
-                exc,
-            )
-            return None, []
+        replied_evt = self._recent_event_by_id(room_id, target_event_id)
+        if replied_evt is None:
+            try:
+                replied_evt = await self.client.get_event(
+                    RoomID(room_id), EventID(target_event_id)
+                )
+            except Exception as exc:
+                log.warning(
+                    "[%s] Failed to fetch replied event %s: %s",
+                    room_id,
+                    target_event_id,
+                    exc,
+                )
+                return None, []
 
         source = getattr(replied_evt, "source", None)
         sender_id = str(getattr(replied_evt, "sender", "") or "")
