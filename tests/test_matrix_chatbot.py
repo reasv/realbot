@@ -520,13 +520,70 @@ class MatrixReplyContextTests(unittest.IsolatedAsyncioTestCase):
             },
         )()
 
-        with patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}):
+        with (
+            patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}),
+            patch("src.matrix_chatbot.load_channel_history", return_value={"messages": []}),
+        ):
             msg = await bot._process_message(evt)
 
         text = msg["message"]
         self.assertIn("[Link Previews]", text)
         self.assertIn("[Reply Context]", text)
         self.assertLess(text.index("[Link Previews]"), text.index("[Reply Context]"))
+
+    async def test_process_message_skips_reply_context_for_latest_bot_message(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._get_display_name = AsyncMock(return_value="Alice")  # type: ignore
+        bot._extract_images = AsyncMock(return_value=([], []))  # type: ignore
+        bot._extract_reply_context = AsyncMock(  # type: ignore
+            return_value=("[Reply Context]\nMessage: should not be used", [])
+        )
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "replying to latest bot msg",
+                "serialize": lambda self: {
+                    "body": "replying to latest bot msg",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$bot-latest"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {
+                "sender": "@alice:example.org",
+                "room_id": "!room:example.org",
+                "event_id": "$evt",
+                "content": content,
+            },
+        )()
+
+        with (
+            patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}),
+            patch(
+                "src.matrix_chatbot.load_channel_history",
+                return_value={
+                    "messages": [
+                        {"user": "Alice", "message": "hello", "messageId": "$m1"},
+                        {
+                            "user": "{{char}}",
+                            "message": "latest bot response",
+                            "messageId": "$bot-latest",
+                        },
+                    ]
+                },
+            ),
+        ):
+            msg = await bot._process_message(evt)
+
+        bot._extract_reply_context.assert_not_awaited()
+        self.assertEqual(msg["message"], "replying to latest {{char}} msg")
 
     async def test_extract_reply_context_fetches_parent_and_attaches_image(self):
         bot = MatrixBot.__new__(MatrixBot)

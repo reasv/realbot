@@ -1047,9 +1047,20 @@ class MatrixBot:
                     processed["message"] = neighbor_suffix
 
         images, link_previews = await self._extract_images(evt)
-        reply_context, reply_images = await self._extract_reply_context(
-            evt, reply_to_event_id
-        )
+        reply_context: str | None = None
+        reply_images: list[dict] = []
+        if reply_to_event_id and self._is_reply_to_latest_bot_message(
+            room_id, reply_to_event_id
+        ):
+            log.debug(
+                "[%s] Skipping reply context for latest bot message %s",
+                room_id,
+                reply_to_event_id,
+            )
+        else:
+            reply_context, reply_images = await self._extract_reply_context(
+                evt, reply_to_event_id
+            )
 
         max_images = int(get_config().get("matrix", {}).get("max_images_per_message", 5))
         all_images: list[dict] = list(images)
@@ -1419,6 +1430,38 @@ class MatrixBot:
             if str(item.get("messageId", "")) == event_id_str:
                 return item
         return None
+
+    @staticmethod
+    def _latest_assistant_message_id(room_id: str) -> str | None:
+        try:
+            history = load_channel_history(room_id)
+        except Exception:
+            return None
+
+        messages = history.get("messages")
+        if not isinstance(messages, list):
+            return None
+
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if item.get("user") != "{{char}}":
+                continue
+            msg_id = item.get("messageId")
+            if not isinstance(msg_id, str):
+                continue
+            msg_id = msg_id.strip()
+            if not msg_id or msg_id.startswith("pending:"):
+                continue
+            return msg_id
+        return None
+
+    @classmethod
+    def _is_reply_to_latest_bot_message(cls, room_id: str, reply_event_id: str) -> bool:
+        latest = cls._latest_assistant_message_id(room_id)
+        if not latest:
+            return False
+        return latest == str(reply_event_id)
 
     async def _extract_event_images(
         self, evt: Any, room_id: str, source: str
