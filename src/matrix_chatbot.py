@@ -95,11 +95,11 @@ def matrix_content_mentions_user(
         user_ids = mentions.get("user_ids", [])
         if isinstance(user_ids, list) and user_id in user_ids:
             return True
-    # 2. Textual @alias in body
+    # 2. Textual @alias in body (requires '@' prefix)
     body = content.get("body", "")
     if isinstance(body, str):
         for alias in aliases:
-            if re.search(rf"(?<!\w)@?{re.escape(alias)}(?!\w)", body, re.IGNORECASE):
+            if re.search(rf"(?<!\w)@{re.escape(alias)}(?!\w)", body, re.IGNORECASE):
                 return True
     return False
 

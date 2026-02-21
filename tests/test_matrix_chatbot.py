@@ -33,6 +33,12 @@ class MatrixMentionTests(unittest.TestCase):
         self.assertFalse(
             matrix_content_mentions_user(content, "@bot:matrix.org", aliases=["OtherName"])
         )
+        plain_name_content = {"body": "hey BotNick, can you check this?"}
+        self.assertFalse(
+            matrix_content_mentions_user(
+                plain_name_content, "@bot:matrix.org", aliases=["BotNick"]
+            )
+        )
 
     def test_generated_mentions_unique_and_ambiguous(self):
         mapping = {"alice": "@alice:matrix.org"}
