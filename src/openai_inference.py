@@ -81,13 +81,14 @@ def _load_system_prompt_template(
     config: dict[str, Any],
     channel_id: int | str | None = None,
     is_dm: bool = False,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str | None]:
     """
-    Returns `(template, uses_double_brace_syntax)`.
+    Returns `(template, uses_double_brace_syntax, template_filename)`.
+    `template_filename` is `None` when using the built-in default template.
     """
     openai_cfg = config.get("openai", {})
     if not isinstance(openai_cfg, dict):
-        return SYSTEM_PROMPT_TEMPLATE, False
+        return SYSTEM_PROMPT_TEMPLATE, False, None
 
     template_name = _channel_template_override_name(openai_cfg, channel_id)
     if not template_name:
@@ -95,7 +96,7 @@ def _load_system_prompt_template(
     if not template_name:
         template_name = str(openai_cfg.get("system_prompt_template_name", "") or "").strip()
     if not template_name:
-        return SYSTEM_PROMPT_TEMPLATE, False
+        return SYSTEM_PROMPT_TEMPLATE, False, None
     template_name = os.path.basename(template_name)
 
     template_dir = str(openai_cfg.get("system_prompt_template_dir", "prompts") or "").strip()
@@ -106,10 +107,10 @@ def _load_system_prompt_template(
     resolved_path = os.path.join(resolved_dir, template_name)
     try:
         with open(resolved_path, "r", encoding="utf-8") as f:
-            return f.read(), True
+            return f.read(), True, template_name
     except Exception as e:
         print(f"Failed to load system prompt template file {resolved_path}; using default template. {e}")
-        return SYSTEM_PROMPT_TEMPLATE, False
+        return SYSTEM_PROMPT_TEMPLATE, False, None
 
 
 def _as_string_list(value: Any) -> List[str]:
@@ -406,6 +407,8 @@ def _log_openai_response(
     model: str,
     openai_url: str,
     timeout_seconds: int,
+    request_payload: dict[str, Any],
+    system_prompt_template_filename: str | None,
 ) -> None:
     log_file = os.getenv("OPENAI_RESPONSE_LOG_FILE", "").strip()
     if not log_file:
@@ -416,6 +419,8 @@ def _log_openai_response(
         "model": model,
         "api_url": openai_url,
         "timeout_seconds": timeout_seconds,
+        "request": _response_to_jsonable(request_payload),
+        "system_prompt_template_filename": system_prompt_template_filename,
         "response": _response_to_jsonable(completion),
     }
 
@@ -448,7 +453,7 @@ async def run_inference(
     )
     username = os.getenv("BOT_NAME")
     openai_model = config.get("openai", {}).get("model", "default")
-    system_prompt_template, use_double_brace_template = _load_system_prompt_template(
+    system_prompt_template, use_double_brace_template, system_prompt_template_filename = _load_system_prompt_template(
         config,
         channel_id=channel_id,
         is_dm=is_dm,
@@ -474,18 +479,23 @@ async def run_inference(
             *normalize_chat_history(history),
         ]
     override_params = _load_override_params()
+    request_payload = {
+        "model": openai_model,
+        "messages": message_history,
+        "max_tokens": max_tokens,
+        "extra_body": override_params,
+    }
     try:
         completion = await client.chat.completions.create(
-                model=openai_model,
-                messages=message_history,  # type: ignore
-                max_tokens=max_tokens,
-                extra_body=override_params,
+                **request_payload,  # type: ignore[arg-type]
             )
         _log_openai_response(
             completion,
             model=openai_model,
             openai_url=openai_url,
             timeout_seconds=timeout_seconds,
+            request_payload=request_payload,
+            system_prompt_template_filename=system_prompt_template_filename,
         )
         return {
             "message": completion.choices[0].message.content,

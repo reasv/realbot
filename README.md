@@ -57,7 +57,7 @@ General:
 - `LLM_API_KEY`
 - `OPENAI_API_URL`
 - `SAMPLING_OVERRIDE_FILE`
-- `OPENAI_RESPONSE_LOG_FILE` (optional; appends full API responses as JSONL)
+- `OPENAI_RESPONSE_LOG_FILE` (optional; appends request/response JSONL entries, including `system_prompt_template_filename`)
 
 Discord:
 

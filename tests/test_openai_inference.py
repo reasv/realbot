@@ -210,6 +210,10 @@ class RunInferenceOverrideFileTests(unittest.IsolatedAsyncioTestCase):
             payload = json.loads(rows[0])
             self.assertEqual(payload["model"], "fake-model")
             self.assertEqual(payload["api_url"], "http://localhost:5000/v1")
+            self.assertEqual(payload["request"]["model"], "fake-model")
+            self.assertEqual(payload["request"]["max_tokens"], 32)
+            self.assertEqual(payload["request"]["extra_body"], {})
+            self.assertEqual(payload["system_prompt_template_filename"], None)
             self.assertEqual(payload["response"]["id"], "cmpl_test")
 
 
@@ -302,6 +306,62 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_create.await_count, 1)
         messages = fake_create.await_args.kwargs["messages"]
         self.assertEqual(messages[0]["content"], 'JSON example: {"k":"v"}; user=assistant')
+
+    async def test_run_inference_logs_template_filename_when_file_template_is_used(self):
+        class FakeCompletion:
+            def __init__(self, content: str):
+                self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]
+
+            def model_dump(self, mode: str = "json"):
+                return {
+                    "id": "cmpl_test_template",
+                    "choices": [{"message": {"content": "hello"}}],
+                }
+
+        fake_create = AsyncMock(return_value=FakeCompletion("hello"))
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            template_name = "example_system_prompt.txt"
+            template_path = os.path.join(td, template_name)
+            with open(template_path, "w", encoding="utf-8") as f:
+                f.write("You are {{assistant_username}}.")
+
+            log_path = os.path.join(td, "openai-response.jsonl")
+            cfg = {
+                "openai": {
+                    "max_tokens": 32,
+                    "model": "fake-model",
+                    "api_url": "http://localhost:5000/v1",
+                    "system_prompt_template_dir": td,
+                    "system_prompt_template_name": template_name,
+                }
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                    "OPENAI_RESPONSE_LOG_FILE": log_path,
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}]
+                )
+
+            self.assertEqual(result, {"message": "hello"})
+            with open(log_path, "r", encoding="utf-8") as f:
+                rows = [line.strip() for line in f.readlines() if line.strip()]
+            self.assertEqual(len(rows), 1)
+            payload = json.loads(rows[0])
+            self.assertEqual(payload["system_prompt_template_filename"], template_name)
+            self.assertEqual(payload["request"]["messages"][0]["role"], "system")
 
     async def test_run_inference_uses_channel_override_template_name(self):
         fake_create = AsyncMock(
