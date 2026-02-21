@@ -21,9 +21,10 @@ ctx_len = 30
 
 
 [openai]
-# Optional path to a text file whose contents replace the built-in system prompt template.
+# Optional prompt template settings to replace the built-in system prompt template.
 # File templates use `{{assistant_username}}` placeholders.
-# system_prompt_template_file = "prompts/system_prompt.txt"
+# system_prompt_template_dir = "prompts"
+# system_prompt_template_name = "example_system_prompt.txt"
 # If stopping_strings_limit != -1, assistant messages are truncated after the
 # (stopping_strings_limit + 1)th "run" of one or more consecutive stopping strings.
 stopping_strings = ["\n"]

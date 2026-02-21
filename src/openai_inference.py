@@ -48,11 +48,17 @@ def _load_system_prompt_template(config: dict[str, Any]) -> tuple[str, bool]:
     if not isinstance(openai_cfg, dict):
         return SYSTEM_PROMPT_TEMPLATE, False
 
-    template_file = str(openai_cfg.get("system_prompt_template_file", "") or "").strip()
-    if not template_file:
+    template_name = str(openai_cfg.get("system_prompt_template_name", "") or "").strip()
+    if not template_name:
         return SYSTEM_PROMPT_TEMPLATE, False
+    template_name = os.path.basename(template_name)
 
-    resolved_path = os.path.expanduser(template_file)
+    template_dir = str(openai_cfg.get("system_prompt_template_dir", "prompts") or "").strip()
+    if not template_dir:
+        template_dir = "prompts"
+
+    resolved_dir = os.path.expanduser(template_dir)
+    resolved_path = os.path.join(resolved_dir, template_name)
     try:
         with open(resolved_path, "r", encoding="utf-8") as f:
             return f.read(), True

@@ -131,7 +131,8 @@ Supports regenerate/prev/next controls, whitelists, and optional auto-react cont
 
 Optional prompt/truncation controls under `[openai]`:
 
-- `system_prompt_template_file` (optional path to a `.txt` template file; supports `{{assistant_username}}`)
+- `system_prompt_template_dir` (optional directory containing prompt template files; default `prompts`)
+- `system_prompt_template_name` (optional template filename, e.g. `example_system_prompt.txt`; supports `{{assistant_username}}`)
 - `stopping_strings`
 - `stopping_strings_limit`
 

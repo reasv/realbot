@@ -189,7 +189,7 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with tempfile.TemporaryDirectory() as td:
-            template_path = os.path.join(td, "system_prompt.txt")
+            template_path = os.path.join(td, "example_system_prompt.txt")
             with open(template_path, "w", encoding="utf-8") as f:
                 f.write("You are {{assistant_username}}. Reply with one sentence.")
 
@@ -198,7 +198,8 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
                     "max_tokens": 32,
                     "model": "fake-model",
                     "api_url": "http://localhost:5000/v1",
-                    "system_prompt_template_file": template_path,
+                    "system_prompt_template_dir": td,
+                    "system_prompt_template_name": "example_system_prompt.txt",
                 }
             }
 
@@ -233,7 +234,7 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with tempfile.TemporaryDirectory() as td:
-            template_path = os.path.join(td, "system_prompt.txt")
+            template_path = os.path.join(td, "example_system_prompt.txt")
             with open(template_path, "w", encoding="utf-8") as f:
                 f.write('JSON example: {"k":"v"}; user={{assistant_username}}')
 
@@ -242,7 +243,8 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
                     "max_tokens": 32,
                     "model": "fake-model",
                     "api_url": "http://localhost:5000/v1",
-                    "system_prompt_template_file": template_path,
+                    "system_prompt_template_dir": td,
+                    "system_prompt_template_name": "example_system_prompt.txt",
                 }
             }
 

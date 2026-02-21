@@ -13,3 +13,6 @@ characters/*
 scripts/
 overrides.json
 logs/
+
+prompts/*
+!prompts/example_system_prompt.txt
