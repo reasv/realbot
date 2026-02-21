@@ -52,6 +52,7 @@ from .openai_inference import (
     finalize_assistant_message_id,
     finalize_last_assistant_message_id,
     get_swipe_nav_state,
+    load_channel_history,
     swipe_next,
     swipe_prev,
     swipe_regenerate,
@@ -254,6 +255,66 @@ def _serialize_event_content(content: Any) -> dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _event_content_dict(evt: Any) -> dict[str, Any]:
+    content = _serialize_event_content(getattr(evt, "content", None))
+    if content:
+        return content
+
+    source = getattr(evt, "source", None)
+    if isinstance(source, dict):
+        source_content = source.get("content")
+        if isinstance(source_content, dict):
+            return source_content
+    return {}
+
+
+def _event_text_body(evt: Any) -> str:
+    content = getattr(evt, "content", None)
+    content_dict = _event_content_dict(evt)
+
+    body = content_dict.get("body")
+    if isinstance(body, str):
+        return body
+
+    new_content = content_dict.get("m.new_content")
+    if isinstance(new_content, dict):
+        new_body = new_content.get("body")
+        if isinstance(new_body, str):
+            return new_body
+
+    body_obj = getattr(content, "body", None)
+    if isinstance(body_obj, str):
+        return body_obj
+    return ""
+
+
+def _image_filenames_from_records(records: list[dict]) -> list[str]:
+    names: list[str] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        name: str | None = None
+
+        filename = rec.get("filename")
+        if isinstance(filename, str) and filename.strip():
+            name = filename.strip()
+        if not name:
+            local_path = rec.get("local_path")
+            if isinstance(local_path, str) and local_path.strip():
+                name = os.path.basename(local_path)
+        if not name:
+            url = rec.get("url")
+            if isinstance(url, str) and url.strip():
+                raw = url.split("?")[0].rstrip("/")
+                if raw:
+                    name = raw.rsplit("/", 1)[-1]
+
+        if name and name not in names:
+            names.append(name)
+
+    return names
 
 
 def _event_timestamp_ms(evt: Any) -> int | None:
@@ -1200,7 +1261,11 @@ class MatrixBot:
             )
             return None, []
 
+        source = getattr(replied_evt, "source", None)
         sender_id = str(getattr(replied_evt, "sender", "") or "")
+        if not sender_id and isinstance(source, dict):
+            sender_id = str(source.get("sender", "") or "")
+
         sender_name = sender_id or "unknown"
         if sender_id:
             try:
@@ -1208,39 +1273,98 @@ class MatrixBot:
             except Exception:
                 pass
 
-        reply_content = getattr(replied_evt, "content", None)
-        reply_body = getattr(reply_content, "body", None) or ""
-        reply_text = self._clean_content(reply_body).strip() or "(no text)"
+        reply_body = _event_text_body(replied_evt)
+        reply_text = self._clean_content(reply_body).strip()
 
         reply_images, reply_filenames = await self._extract_event_images(
             replied_evt, room_id, source="matrix_reply"
         )
+        if not reply_filenames and reply_images:
+            reply_filenames = _image_filenames_from_records(reply_images)
+
+        history_msg = None
+        if not reply_text or not reply_images:
+            history_msg = self._history_message_by_id(room_id, target_event_id)
+
+        if not reply_text and isinstance(history_msg, dict):
+            history_text = history_msg.get("message")
+            if isinstance(history_text, str) and history_text.strip():
+                reply_text = history_text.strip()
+
+        if not reply_images and isinstance(history_msg, dict):
+            history_images = history_msg.get("images")
+            if isinstance(history_images, list):
+                copied_images: list[dict] = [
+                    dict(item) for item in history_images if isinstance(item, dict)
+                ]
+                if copied_images:
+                    reply_images = copied_images
+                    reply_filenames = _image_filenames_from_records(reply_images)
+
+        if sender_name == "unknown" and isinstance(history_msg, dict):
+            history_user = history_msg.get("user")
+            if isinstance(history_user, str) and history_user.strip():
+                sender_name = history_user.strip()
+
+        if not reply_text and not reply_images:
+            return None, []
 
         lines = [
             "[Reply Context]",
             "The message above is replying to this previous message:",
             f"From: {sender_name}",
-            f"Message: {reply_text}",
         ]
+        if reply_text:
+            lines.append(f"Message: {reply_text}")
         if reply_filenames:
             lines.append(
                 "Replied Message Image Filename(s): " + ", ".join(reply_filenames)
             )
+        elif reply_images:
+            lines.append("Replied Message Image(s): attached")
 
         return "\n".join(lines), reply_images
+
+    @staticmethod
+    def _history_message_by_id(room_id: str, event_id: str) -> dict[str, Any] | None:
+        try:
+            history = load_channel_history(room_id)
+        except Exception:
+            return None
+
+        messages = history.get("messages")
+        if not isinstance(messages, list):
+            return None
+
+        event_id_str = str(event_id)
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("messageId", "")) == event_id_str:
+                return item
+        return None
 
     async def _extract_event_images(
         self, evt: Any, room_id: str, source: str
     ) -> tuple[list[dict], list[str]]:
         content = getattr(evt, "content", None)
-        msgtype = getattr(content, "msgtype", None)
-        if msgtype != MessageType.IMAGE:
+        content_dict = _event_content_dict(evt)
+
+        msgtype = content_dict.get("msgtype", getattr(content, "msgtype", None))
+        if msgtype != MessageType.IMAGE and str(msgtype) != "m.image":
             return [], []
 
-        url = getattr(content, "url", None)
-        enc_file = getattr(content, "file", None)
-        filename = getattr(content, "body", "image.png") or "image.png"
-        media_url = url or (enc_file.url if enc_file else None)
+        url = content_dict.get("url", getattr(content, "url", None))
+        enc_file = content_dict.get("file", getattr(content, "file", None))
+        filename = content_dict.get("body", getattr(content, "body", "image.png"))
+        if not isinstance(filename, str) or not filename:
+            filename = "image.png"
+
+        media_url = url
+        if not media_url and isinstance(enc_file, dict):
+            media_url = enc_file.get("url")
+        if not media_url and enc_file:
+            media_url = getattr(enc_file, "url", None)
         filenames = [filename]
         if not media_url:
             return [], filenames
@@ -1248,12 +1372,27 @@ class MatrixBot:
         try:
             data = await self.client.download_media(media_url)
             if enc_file and not url:
-                data = decrypt_attachment(
-                    data,
-                    enc_file.key.key,
-                    enc_file.hashes["sha256"],
-                    enc_file.iv,
-                )
+                if isinstance(enc_file, dict):
+                    key_obj = enc_file.get("key", {})
+                    key = key_obj.get("k") if isinstance(key_obj, dict) else None
+                    hashes = enc_file.get("hashes", {})
+                    sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
+                    iv = enc_file.get("iv")
+                    if (
+                        isinstance(key, str)
+                        and isinstance(sha256, str)
+                        and isinstance(iv, str)
+                    ):
+                        data = decrypt_attachment(data, key, sha256, iv)
+                    else:
+                        raise ValueError("Encrypted attachment metadata missing key/hash/iv")
+                else:
+                    data = decrypt_attachment(
+                        data,
+                        enc_file.key.key,
+                        enc_file.hashes["sha256"],
+                        enc_file.iv,
+                    )
             local = await download_image_to_history(
                 room_id, str(media_url), filename, data=data
             )

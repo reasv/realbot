@@ -595,6 +595,142 @@ class MatrixReplyContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images[0]["source"], "matrix_reply")
         self.assertEqual(images[0]["filename"], "cat.png")
 
+    async def test_extract_reply_context_reads_text_from_dict_content(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+
+        async def fake_get_member(_self, _room_id, _user_id):
+            return None
+
+        bot.state_store = type("StateStore", (), {"get_member": fake_get_member})()
+        replied_evt = type(
+            "ReplyEvent",
+            (),
+            {"sender": "@bob:example.org", "content": {"msgtype": "m.text", "body": "parent text"}},
+        )()
+        bot.client = type("Client", (), {})()
+        bot.client.get_event = AsyncMock(return_value=replied_evt)
+        bot.client.download_media = AsyncMock()
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "ok",
+                "serialize": lambda self: {
+                    "body": "ok",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": "!room:example.org", "content": content},
+        )()
+
+        section, images = await bot._extract_reply_context(evt)
+        self.assertIsNotNone(section)
+        assert section is not None
+        self.assertIn("Message: parent text", section)
+        self.assertEqual(images, [])
+
+    async def test_extract_reply_context_falls_back_to_history_text(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+
+        async def fake_get_member(_self, _room_id, _user_id):
+            return None
+
+        bot.state_store = type("StateStore", (), {"get_member": fake_get_member})()
+        replied_evt = type(
+            "ReplyEvent",
+            (),
+            {"sender": "@bot:example.org", "content": {"msgtype": "m.room.encrypted"}},
+        )()
+        bot.client = type("Client", (), {})()
+        bot.client.get_event = AsyncMock(return_value=replied_evt)
+        bot.client.download_media = AsyncMock()
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "ok",
+                "serialize": lambda self: {
+                    "body": "ok",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": "!room:example.org", "content": content},
+        )()
+
+        with patch(
+            "src.matrix_chatbot.load_channel_history",
+            return_value={
+                "messages": [
+                    {"user": "{{char}}", "message": "stored bot text", "messageId": "$parent"}
+                ]
+            },
+        ):
+            section, images = await bot._extract_reply_context(evt)
+
+        self.assertIsNotNone(section)
+        assert section is not None
+        self.assertIn("From: {{char}}", section)
+        self.assertIn("Message: stored bot text", section)
+        self.assertEqual(images, [])
+
+    async def test_extract_reply_context_skips_empty_context(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+
+        async def fake_get_member(_self, _room_id, _user_id):
+            return None
+
+        bot.state_store = type("StateStore", (), {"get_member": fake_get_member})()
+        replied_evt = type(
+            "ReplyEvent",
+            (),
+            {"sender": "@bob:example.org", "content": {"msgtype": "m.text"}},
+        )()
+        bot.client = type("Client", (), {})()
+        bot.client.get_event = AsyncMock(return_value=replied_evt)
+        bot.client.download_media = AsyncMock()
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "ok",
+                "serialize": lambda self: {
+                    "body": "ok",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": "!room:example.org", "content": content},
+        )()
+
+        with patch("src.matrix_chatbot.load_channel_history", return_value={"messages": []}):
+            section, images = await bot._extract_reply_context(evt)
+
+        self.assertIsNone(section)
+        self.assertEqual(images, [])
+
     async def test_process_message_preserves_quoted_reply_text(self):
         bot = MatrixBot.__new__(MatrixBot)
         bot.bot_mxid = "@bot:example.org"
