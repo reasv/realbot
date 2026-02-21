@@ -43,6 +43,15 @@ class Bot(discord.Client):
     # guild_id -> (timestamp, display_name_index, username_index)
     mentionIndexCache: dict[int, tuple[float, dict[str, int], dict[str, int]]] = {}
 
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.pendingMessages = {}
+        self.pendingSwipes = {}
+        self.randomChats = {}
+        self.mentionIndexCache = {}
+        self._inflight_channels: set[int] = set()
+        self._inflight_tasks: dict[int, asyncio.Task[None]] = {}
+
     async def on_ready(self):
         print(f'Logged on as {self.user}!')
 
@@ -550,12 +559,23 @@ class Bot(discord.Client):
         if not channel_whitelist:
             return user_key in user_whitelist
         return (user_key in user_whitelist) or (channel_key in channel_whitelist)
+
+    def _on_channel_task_done(self, channelID: int, task: asyncio.Task[None]) -> None:
+        self._inflight_channels.discard(channelID)
+        self._inflight_tasks.pop(channelID, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[{channelID}] Background channel task failed: {e}")
     
     async def process_messages(self):
         channelIDs = list(set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys()))
-        tasks = []
         
         for channelID in channelIDs:
+            if channelID in self._inflight_channels:
+                continue
             pending = self.pendingMessages.get(channelID, [])
             swipe_jobs = self.pendingSwipes.get(channelID, [])
             if len(pending) == 0 and len(swipe_jobs) == 0:
@@ -712,10 +732,16 @@ class Bot(discord.Client):
                 else:
                     print("No response")
                     
-            tasks.append(process_channel(channel, channelID, pending, swipe_jobs))
-        
-        # Run all tasks concurrently
-        await asyncio.gather(*tasks)
+            task = asyncio.create_task(
+                process_channel(channel, channelID, pending, swipe_jobs)
+            )
+            self._inflight_channels.add(channelID)
+            self._inflight_tasks[channelID] = task
+            task.add_done_callback(
+                lambda done_task, cid=channelID: self._on_channel_task_done(
+                    cid, done_task
+                )
+            )
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         assert self.user is not None, "User is None"
@@ -750,9 +776,17 @@ class Bot(discord.Client):
     
     async def inference_loop_task(self):
         await self.wait_until_ready()
-        while not self.is_closed():
-            await self.process_messages()
-            await asyncio.sleep(0.5)
+        try:
+            while not self.is_closed():
+                await self.process_messages()
+                await asyncio.sleep(0.5)
+        finally:
+            for task in list(self._inflight_tasks.values()):
+                task.cancel()
+            if self._inflight_tasks:
+                await asyncio.gather(*self._inflight_tasks.values(), return_exceptions=True)
+            self._inflight_tasks.clear()
+            self._inflight_channels.clear()
 
 def is_whitelisted(channelID: int, wtype: str = 'always'):
     config = get_config()

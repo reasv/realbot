@@ -350,6 +350,10 @@ class MatrixBot:
         # Queues
         self.pendingMessages: dict[str, list[dict]] = {}
         self.pendingSwipes: dict[str, list[tuple[str, str]]] = {}
+        self._inflight_rooms: set[str] = set()
+        self._inflight_tasks: dict[str, asyncio.Task[None]] = {}
+        self._typing_timeout_ms: int = 30000
+        self._typing_refresh_seconds: float = 20.0
         self.randomChats: dict[str, RandomChat] = {}
         self.recentMessages: dict[str, deque] = {}
         self._direct_rooms: set[str] = set()
@@ -470,6 +474,12 @@ class MatrixBot:
         except asyncio.CancelledError:
             pass
         finally:
+            for task in list(self._inflight_tasks.values()):
+                task.cancel()
+            if self._inflight_tasks:
+                await asyncio.gather(*self._inflight_tasks.values(), return_exceptions=True)
+            self._inflight_tasks.clear()
+            self._inflight_rooms.clear()
             self.client.stop()
             if hasattr(self, "crypto_db"):
                 await self.crypto_db.stop()
@@ -1268,19 +1278,32 @@ class MatrixBot:
         room_ids = list(
             set(self.pendingMessages.keys()) | set(self.pendingSwipes.keys())
         )
-        tasks: list = []
 
         for room_id in room_ids:
+            if room_id in self._inflight_rooms:
+                continue
             pending = self.pendingMessages.get(room_id, [])
             swipe_jobs = self.pendingSwipes.get(room_id, [])
             if not pending and not swipe_jobs:
                 continue
             self.pendingMessages[room_id] = []
             self.pendingSwipes[room_id] = []
-            tasks.append(self._process_room(room_id, pending, swipe_jobs))
+            task = asyncio.create_task(self._process_room(room_id, pending, swipe_jobs))
+            self._inflight_rooms.add(room_id)
+            self._inflight_tasks[room_id] = task
+            task.add_done_callback(
+                lambda done_task, rid=room_id: self._on_room_task_done(rid, done_task)
+            )
 
-        if tasks:
-            await asyncio.gather(*tasks)
+    def _on_room_task_done(self, room_id: str, task: asyncio.Task[None]) -> None:
+        self._inflight_rooms.discard(room_id)
+        self._inflight_tasks.pop(room_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("[%s] Room task failed", room_id)
 
     async def _process_room(
         self,
@@ -1288,11 +1311,8 @@ class MatrixBot:
         messages: list[dict],
         swipe_jobs: list[tuple[str, str]],
     ) -> None:
-        # Typing indicator
-        try:
-            await self.client.set_typing(RoomID(room_id), timeout=30000)
-        except Exception:
-            pass
+        await self._set_typing(room_id, True)
+        typing_task = asyncio.create_task(self._typing_keepalive(room_id))
 
         try:
             if swipe_jobs:
@@ -1300,10 +1320,9 @@ class MatrixBot:
             if messages:
                 await self._handle_inference(room_id, messages)
         finally:
-            try:
-                await self.client.set_typing(RoomID(room_id), timeout=0)
-            except Exception:
-                pass
+            typing_task.cancel()
+            await asyncio.gather(typing_task, return_exceptions=True)
+            await self._set_typing(room_id, False)
 
     # ── swipe handling ───────────────────────────────────────────────
 
@@ -1488,10 +1507,16 @@ class MatrixBot:
 
     async def _set_typing(self, room_id: str, typing: bool) -> None:
         try:
-            timeout = 30000 if typing else 0
+            timeout = self._typing_timeout_ms if typing else 0
             await self.client.set_typing(RoomID(room_id), timeout=timeout)
         except Exception:
             pass
+
+    async def _typing_keepalive(self, room_id: str) -> None:
+        interval = max(float(getattr(self, "_typing_refresh_seconds", 20.0)), 0.1)
+        while True:
+            await asyncio.sleep(interval)
+            await self._set_typing(room_id, True)
 
     # ── @-mention resolution ─────────────────────────────────────────
 

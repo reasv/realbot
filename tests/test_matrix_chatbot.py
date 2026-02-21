@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 from unittest.mock import AsyncMock, patch
 import tempfile
 import os
@@ -312,3 +313,112 @@ class MatrixInviteFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         await bot._on_room_member(evt)
         bot._join_invited_room.assert_not_awaited()
+
+
+class MatrixInferenceSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_process_messages_schedules_other_rooms_while_one_room_inflight(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.pendingMessages = {"!a:example.org": [{"user": "alice", "message": "one"}]}
+        bot.pendingSwipes = {}
+        bot._inflight_rooms = set()
+        bot._inflight_tasks = {}
+
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        started: list[str] = []
+
+        async def fake_process_room(
+            room_id: str, messages: list[dict], swipe_jobs: list[tuple[str, str]]
+        ) -> None:
+            started.append(room_id)
+            if room_id == "!a:example.org":
+                await gate_a.wait()
+            elif room_id == "!b:example.org":
+                await gate_b.wait()
+
+        bot._process_room = fake_process_room  # type: ignore
+
+        await bot._process_messages()
+        await asyncio.sleep(0)
+
+        self.assertIn("!a:example.org", started)
+        self.assertIn("!a:example.org", bot._inflight_rooms)
+
+        bot.pendingMessages["!b:example.org"] = [{"user": "bob", "message": "two"}]
+        await bot._process_messages()
+        await asyncio.sleep(0)
+
+        self.assertIn("!b:example.org", started)
+        self.assertIn("!b:example.org", bot._inflight_rooms)
+
+        gate_a.set()
+        gate_b.set()
+        if bot._inflight_tasks:
+            await asyncio.gather(*bot._inflight_tasks.values(), return_exceptions=True)
+
+    async def test_process_messages_keeps_per_room_execution_sequential(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.pendingMessages = {"!a:example.org": [{"user": "alice", "message": "first"}]}
+        bot.pendingSwipes = {}
+        bot._inflight_rooms = set()
+        bot._inflight_tasks = {}
+
+        gate = asyncio.Event()
+        calls: list[int] = []
+
+        async def fake_process_room(
+            room_id: str, messages: list[dict], swipe_jobs: list[tuple[str, str]]
+        ) -> None:
+            calls.append(len(messages))
+            if len(calls) == 1:
+                await gate.wait()
+
+        bot._process_room = fake_process_room  # type: ignore
+
+        await bot._process_messages()
+        await asyncio.sleep(0)
+        self.assertEqual(calls, [1])
+
+        bot.pendingMessages["!a:example.org"] = [{"user": "alice", "message": "second"}]
+        await bot._process_messages()
+        await asyncio.sleep(0)
+        self.assertEqual(calls, [1])
+
+        gate.set()
+        if bot._inflight_tasks:
+            await asyncio.gather(*bot._inflight_tasks.values(), return_exceptions=True)
+
+        await bot._process_messages()
+        await asyncio.sleep(0)
+        self.assertEqual(calls, [1, 1])
+
+
+class MatrixTypingIndicatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_process_room_refreshes_typing_until_finished(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot._typing_timeout_ms = 30000
+        bot._typing_refresh_seconds = 0.01
+
+        typing_states: list[bool] = []
+        gate = asyncio.Event()
+
+        async def fake_set_typing(room_id: str, typing: bool) -> None:
+            typing_states.append(typing)
+
+        async def fake_handle_inference(room_id: str, messages: list[dict]) -> None:
+            await gate.wait()
+
+        bot._set_typing = fake_set_typing  # type: ignore
+        bot._handle_swipes = AsyncMock()  # type: ignore
+        bot._handle_inference = AsyncMock(side_effect=fake_handle_inference)  # type: ignore
+
+        room_task = asyncio.create_task(
+            bot._process_room("!room:example.org", [{"user": "u", "message": "m"}], [])
+        )
+        await asyncio.sleep(0.03)
+        gate.set()
+        await room_task
+
+        self.assertGreaterEqual(sum(1 for state in typing_states if state), 2)
+        self.assertTrue(typing_states)
+        self.assertFalse(typing_states[-1])
