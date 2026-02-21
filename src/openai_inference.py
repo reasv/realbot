@@ -170,12 +170,70 @@ def _history_file_for_channel(channelID: int | str) -> str:
     return f"history/{channelID}.json"
 
 
+def _has_nonempty_images(message: dict[str, Any]) -> bool:
+    images = message.get("images")
+    return isinstance(images, list) and len(images) > 0
+
+
+def _is_empty_assistant_text(message: dict[str, Any]) -> bool:
+    if message.get("user") != "{{char}}":
+        return False
+    if _has_nonempty_images(message):
+        return False
+    text = str(message.get("message", "") or "")
+    return not text.strip()
+
+
+def _sanitize_history_in_place(history: dict[str, Any]) -> bool:
+    """
+    Remove assistant messages with empty text so they do not pollute history/context.
+    If a swipe list has non-empty text, recover the message from that swipe instead.
+    """
+    messages = history.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    changed = False
+    cleaned: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            cleaned.append(message)
+            continue
+
+        if not _is_empty_assistant_text(message):
+            cleaned.append(message)
+            continue
+
+        swipes = message.get("swipes")
+        recovered_text: str | None = None
+        recovered_index: int | None = None
+        if isinstance(swipes, list):
+            for i, swipe in enumerate(swipes):
+                if isinstance(swipe, str) and swipe.strip():
+                    recovered_text = swipe
+                    recovered_index = i
+                    break
+
+        if recovered_text is not None:
+            message["message"] = recovered_text
+            if recovered_index is not None:
+                message["swipeIndex"] = recovered_index
+            cleaned.append(message)
+        changed = True
+
+    if changed:
+        history["messages"] = cleaned
+    return changed
+
+
 def load_channel_history(channelID: int | str) -> dict[str, Any]:
     history_file = _history_file_for_channel(channelID)
     try:
         with open(history_file, "r") as f:
             loaded = json.load(f)
         if isinstance(loaded, dict) and isinstance(loaded.get("messages"), list):
+            if _sanitize_history_in_place(loaded):
+                save_channel_history(channelID, loaded)
             return loaded
     except Exception:
         pass
@@ -183,6 +241,7 @@ def load_channel_history(channelID: int | str) -> dict[str, Any]:
 
 
 def save_channel_history(channelID: int | str, history: dict[str, Any]) -> None:
+    _sanitize_history_in_place(history)
     history_file = _history_file_for_channel(channelID)
     os.makedirs(os.path.dirname(history_file), exist_ok=True)
     with open(history_file, "w") as f:
@@ -321,6 +380,8 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
 
     reply = await _generate_reply_from_stored_messages(history["messages"], username, timeout_seconds)
     if reply is None:
+        return None
+    if not reply.strip():
         return None
 
     pending_message_id = _new_pending_message_id()
@@ -482,6 +543,8 @@ async def swipe_regenerate(channelID: int | str, messageId: str, timeout_seconds
 
     reply = await _generate_reply_from_stored_messages(context_messages, username, timeout_seconds)
     if reply is None:
+        return None
+    if not reply.strip():
         return None
 
     target.setdefault("swipes", [])

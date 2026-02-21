@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -38,6 +39,48 @@ class ChatInferencePendingIdTests(unittest.IsolatedAsyncioTestCase):
                 last = history["messages"][-1]
                 self.assertEqual(last["user"], "{{char}}")
                 self.assertEqual(last["messageId"], pending_id)
+
+
+class ChatInferenceEmptyReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_inference_does_not_store_empty_assistant_reply(self):
+        cfg = {
+            "openai": {
+                "ctx_message_limit": 10,
+                "ctx_image_limit": 2,
+                "stopping_strings": ["\n"],
+                "stopping_strings_limit": -1,
+            }
+        }
+        with tempfile.TemporaryDirectory() as td:
+            history_path = os.path.join(td, "room.json")
+            seeded = {
+                "messages": [
+                    {"user": "alice", "message": "hello"},
+                    {"user": "{{char}}", "message": "", "messageId": "pending:old-empty"},
+                ]
+            }
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump(seeded, f)
+
+            with patch.dict(os.environ, {"BOT_NAME": "assistant"}, clear=False), patch(
+                "src.openai_inference._history_file_for_channel", return_value=history_path
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.run_inference",
+                new=AsyncMock(return_value={"message": ""}),
+            ):
+                result = await openai_inference.chat_inference(
+                    "!room:example.org",
+                    [{"user": "bob", "message": "yo"}],
+                )
+
+            self.assertIsNone(result)
+            history = openai_inference.load_channel_history("!room:example.org")
+            self.assertEqual(
+                [m for m in history["messages"] if m.get("user") == "{{char}}"],
+                [],
+            )
+            self.assertEqual(history["messages"][-1]["user"], "bob")
+            self.assertEqual(history["messages"][-1]["message"], "yo")
 
 
 class RunInferenceOverrideFileTests(unittest.IsolatedAsyncioTestCase):
