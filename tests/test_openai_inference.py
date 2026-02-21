@@ -20,11 +20,12 @@ class ChatInferencePendingIdTests(unittest.IsolatedAsyncioTestCase):
         }
         with tempfile.TemporaryDirectory() as td:
             history_path = os.path.join(td, "room.json")
+            run_inference_mock = AsyncMock(return_value={"message": "assistant: hello there"})
             with patch.dict(os.environ, {"BOT_NAME": "assistant"}, clear=False), patch(
                 "src.openai_inference._history_file_for_channel", return_value=history_path
             ), patch("src.openai_inference.get_config", return_value=cfg), patch(
                 "src.openai_inference.run_inference",
-                new=AsyncMock(return_value={"message": "assistant: hello there"}),
+                new=run_inference_mock,
             ):
                 reply, pending_id = await openai_inference.chat_inference(
                     "!room:example.org",
@@ -39,6 +40,10 @@ class ChatInferencePendingIdTests(unittest.IsolatedAsyncioTestCase):
                 last = history["messages"][-1]
                 self.assertEqual(last["user"], "{{char}}")
                 self.assertEqual(last["messageId"], pending_id)
+                self.assertEqual(
+                    run_inference_mock.await_args.kwargs.get("channel_id"),
+                    "!room:example.org",
+                )
 
 
 class ChatInferenceEmptyReplyTests(unittest.IsolatedAsyncioTestCase):
@@ -266,6 +271,58 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_create.await_count, 1)
         messages = fake_create.await_args.kwargs["messages"]
         self.assertEqual(messages[0]["content"], 'JSON example: {"k":"v"}; user=assistant')
+
+    async def test_run_inference_uses_channel_override_template_name(self):
+        fake_create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))]
+            )
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            default_template_path = os.path.join(td, "example_system_prompt.txt")
+            with open(default_template_path, "w", encoding="utf-8") as f:
+                f.write("DEFAULT: {{assistant_username}}")
+
+            channel_template_path = os.path.join(td, "matrix_room_prompt.txt")
+            with open(channel_template_path, "w", encoding="utf-8") as f:
+                f.write("OVERRIDE: {{assistant_username}}")
+
+            cfg = {
+                "openai": {
+                    "max_tokens": 32,
+                    "model": "fake-model",
+                    "api_url": "http://localhost:5000/v1",
+                    "system_prompt_template_dir": td,
+                    "system_prompt_template_name": "example_system_prompt.txt",
+                    "system_prompt_template_channel_overrides": {
+                        "!room:example.org": "matrix_room_prompt.txt",
+                    },
+                }
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}],
+                    channel_id="!room:example.org",
+                )
+
+        self.assertEqual(result, {"message": "hello"})
+        self.assertEqual(fake_create.await_count, 1)
+        messages = fake_create.await_args.kwargs["messages"]
+        self.assertEqual(messages[0]["content"], "OVERRIDE: assistant")
 
 
 class UsernamePrefixStrippingTests(unittest.TestCase):

@@ -40,7 +40,38 @@ def _render_double_brace_template(template: str, values: dict[str, str]) -> str:
     return _DOUBLE_BRACE_TEMPLATE_PATTERN.sub(repl, template)
 
 
-def _load_system_prompt_template(config: dict[str, Any]) -> tuple[str, bool]:
+def _channel_template_override_name(openai_cfg: dict[str, Any], channel_id: int | str | None) -> str:
+    if channel_id is None:
+        return ""
+
+    overrides = openai_cfg.get("system_prompt_template_channel_overrides", {})
+    if not isinstance(overrides, dict):
+        return ""
+
+    candidates: list[Any] = [channel_id, str(channel_id)]
+    if isinstance(channel_id, str):
+        stripped = channel_id.strip()
+        if stripped and stripped != channel_id:
+            candidates.append(stripped)
+        if stripped.isdigit():
+            try:
+                candidates.append(int(stripped))
+            except Exception:
+                pass
+
+    for key in candidates:
+        value = overrides.get(key)
+        if isinstance(value, str):
+            name = value.strip()
+            if name:
+                return name
+    return ""
+
+
+def _load_system_prompt_template(
+    config: dict[str, Any],
+    channel_id: int | str | None = None,
+) -> tuple[str, bool]:
     """
     Returns `(template, uses_double_brace_syntax)`.
     """
@@ -48,7 +79,9 @@ def _load_system_prompt_template(config: dict[str, Any]) -> tuple[str, bool]:
     if not isinstance(openai_cfg, dict):
         return SYSTEM_PROMPT_TEMPLATE, False
 
-    template_name = str(openai_cfg.get("system_prompt_template_name", "") or "").strip()
+    template_name = _channel_template_override_name(openai_cfg, channel_id)
+    if not template_name:
+        template_name = str(openai_cfg.get("system_prompt_template_name", "") or "").strip()
     if not template_name:
         return SYSTEM_PROMPT_TEMPLATE, False
     template_name = os.path.basename(template_name)
@@ -385,7 +418,11 @@ def _log_openai_response(
         print(f"Failed to write OPENAI_RESPONSE_LOG_FILE {log_file}: {e}")
 
 
-async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30):
+async def run_inference(
+    history: List[dict[str, Any]],
+    timeout_seconds: int = 30,
+    channel_id: int | str | None = None,
+):
     load_dotenv()
     openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
     config = get_config()
@@ -398,7 +435,10 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
     )
     username = os.getenv("BOT_NAME")
     openai_model = config.get("openai", {}).get("model", "default")
-    system_prompt_template, use_double_brace_template = _load_system_prompt_template(config)
+    system_prompt_template, use_double_brace_template = _load_system_prompt_template(
+        config,
+        channel_id=channel_id,
+    )
     if use_double_brace_template:
         system_prompt = _render_double_brace_template(
             system_prompt_template,
@@ -448,6 +488,7 @@ async def _generate_reply_from_stored_messages(
     stored_messages: List[dict[str, Any]],
     username: str,
     timeout_seconds: int,
+    channel_id: int | str | None = None,
 ) -> str | None:
     config = get_config()
     try:
@@ -473,7 +514,7 @@ async def _generate_reply_from_stored_messages(
         if formatted:
             formatted_messages.append(formatted)
 
-    result = await run_inference(formatted_messages, timeout_seconds)
+    result = await run_inference(formatted_messages, timeout_seconds, channel_id=channel_id)
     if result is None:
         return None
 
@@ -499,7 +540,12 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
     history['messages'].extend(messages)
     save_channel_history(channelID, history)
 
-    reply = await _generate_reply_from_stored_messages(history["messages"], username, timeout_seconds)
+    reply = await _generate_reply_from_stored_messages(
+        history["messages"],
+        username,
+        timeout_seconds,
+        channel_id=channelID,
+    )
     if reply is None:
         return None
     if not reply.strip():
@@ -662,7 +708,12 @@ async def swipe_regenerate(channelID: int | str, messageId: str, timeout_seconds
         if isinstance(m, dict):
             context_messages.append(m)
 
-    reply = await _generate_reply_from_stored_messages(context_messages, username, timeout_seconds)
+    reply = await _generate_reply_from_stored_messages(
+        context_messages,
+        username,
+        timeout_seconds,
+        channel_id=channelID,
+    )
     if reply is None:
         return None
     if not reply.strip():

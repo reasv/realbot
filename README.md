@@ -133,8 +133,22 @@ Optional prompt/truncation controls under `[openai]`:
 
 - `system_prompt_template_dir` (optional directory containing prompt template files; default `prompts`)
 - `system_prompt_template_name` (optional template filename, e.g. `example_system_prompt.txt`; supports `{{assistant_username}}`)
+- `system_prompt_template_channel_overrides` (optional channel ID -> template filename map)
 - `stopping_strings`
 - `stopping_strings_limit`
+
+Example:
+
+```toml
+[openai]
+system_prompt_template_dir = "prompts"
+system_prompt_template_name = "example_system_prompt.txt"
+
+[openai.system_prompt_template_channel_overrides]
+"!roomid:matrix.org" = "matrix_room_prompt.txt"
+"#ai" = "irc_channel_prompt.txt"
+"1143322712169787493" = "discord_channel_prompt.txt"
+```
 
 ### Image context
 
