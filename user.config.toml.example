@@ -1,3 +1,6 @@
+[bot]
+respond_to_dms = false
+
 [whitelist]
 always = [
     # Discord channel IDs (int) and IRC/Matrix IDs (string) are supported.

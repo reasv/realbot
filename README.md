@@ -1,6 +1,7 @@
 # realbot
 
 LLM-powered chat bot with multiple transports:
+
 - Discord (user account via `discord.py-self`)
 - IRC
 - Matrix (user account via `matrix-nio`, including E2EE rooms)
@@ -51,6 +52,7 @@ python main.py
 ## Environment variables
 
 General:
+
 - `BOT_NAME`
 - `LLM_API_KEY`
 - `OPENAI_API_URL`
@@ -58,15 +60,18 @@ General:
 - `OPENAI_RESPONSE_LOG_FILE` (optional; appends full API responses as JSONL)
 
 Discord:
+
 - `DISCORD_TOKEN`
 
 IRC:
+
 - `IRC_SERVER`
 - `IRC_PORT`
 - `IRC_NICKNAME`
 - `IRC_CHANNELS`
 
 Matrix:
+
 - `MATRIX_HOMESERVER`
 - `MATRIX_USER_ID`
 - `MATRIX_ACCESS_TOKEN`
@@ -76,10 +81,11 @@ Matrix:
 - `MATRIX_IMPORT_KEYS_PATH` (optional, path to exported Megolm keys file)
 - `MATRIX_IMPORT_KEYS_PASSWORD` (optional, passphrase for imported keys)
 
-Matrix auth is token-based only. Room joins/invite acceptance are not handled by bot logic; join rooms externally with the bot account.
+Matrix auth is password based. The bot auto-accepts room invites.
 
 If logs show `Received undecrypted event ...`, the device is missing room keys.
 You can either:
+
 - Verify this device and wait for new messages, or
 - Export E2EE room keys from another client (e.g. Element) and set
   `MATRIX_IMPORT_KEYS_PATH` + `MATRIX_IMPORT_KEYS_PASSWORD` so the bot can import them on startup.
@@ -93,14 +99,22 @@ Defaults live in `default.config.toml`.
 
 The bot only responds in whitelisted destinations.
 Whitelist entries support mixed ID formats:
+
 - Discord numeric channel IDs
 - IRC channel names (e.g. `#ai`)
 - Matrix room IDs (e.g. `!roomid:matrix.org`)
 
 Buckets:
+
 - `always`: respond to every message
 - `mentions`: respond only when mentioned
 - `rand`: random-chat behavior
+
+### Global bot options
+
+Configured under `[bot]`.
+
+- `respond_to_dms`: when `true`, Matrix DMs (1:1 rooms) are handled even if not whitelisted.
 
 ### Random chat
 
@@ -116,6 +130,7 @@ Supports regenerate/prev/next controls, whitelists, and optional auto-react cont
 ### OpenAI output truncation
 
 Optional truncation controls under `[openai]`:
+
 - `stopping_strings`
 - `stopping_strings_limit`
 

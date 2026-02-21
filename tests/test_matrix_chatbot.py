@@ -1,10 +1,13 @@
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 import tempfile
 import os
 
 from src.matrix_chatbot import (
+    Membership,
+    MessageType,
     MatrixBot,
+    _respond_to_dms_enabled,
     apply_generated_at_mentions,
     dedupe_swipe_jobs,
     matrix_content_mentions_user,
@@ -139,3 +142,167 @@ class MatrixSendIntegrationTests(unittest.IsolatedAsyncioTestCase):
             reaction_call["content"]["m.relates_to"],
             {"event_id": "$target", "rel_type": "m.annotation", "key": "🔄"},
         )
+
+
+class MatrixDmConfigTests(unittest.TestCase):
+    def test_respond_to_dms_toggle_reads_bot_section(self):
+        self.assertTrue(_respond_to_dms_enabled({"bot": {"respond_to_dms": True}}))
+        self.assertFalse(_respond_to_dms_enabled({"bot": {"respond_to_dms": False}}))
+        self.assertFalse(_respond_to_dms_enabled({}))
+
+
+class MatrixDmDetectionTests(unittest.TestCase):
+    def test_is_direct_message_room_with_two_joined_members(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot.state_store = type("StateStore", (), {})()
+        member = type("Member", (), {"membership": Membership.JOIN})
+        bot.state_store.members = {
+            "!dm:example.org": {
+                "@bot:example.org": member(),
+                "@alice:example.org": member(),
+            }
+        }
+
+        self.assertTrue(bot._is_direct_message_room("!dm:example.org"))
+
+    def test_is_direct_message_room_rejects_rooms_with_three_joined_members(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot.state_store = type("StateStore", (), {})()
+        member = type("Member", (), {"membership": Membership.JOIN})
+        bot.state_store.members = {
+            "!group:example.org": {
+                "@bot:example.org": member(),
+                "@alice:example.org": member(),
+                "@bob:example.org": member(),
+            }
+        }
+
+        self.assertFalse(bot._is_direct_message_room("!group:example.org"))
+
+
+class MatrixDmRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_on_message_routes_dm_when_enabled(self):
+        room_id = "!dm:example.org"
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._initial_sync_done = True
+        bot.recentMessages = {}
+        bot._constant_chat = AsyncMock()
+        bot.state_store = type("StateStore", (), {})()
+        member = type("Member", (), {"membership": Membership.JOIN})
+        bot.state_store.members = {
+            room_id: {
+                "@bot:example.org": member(),
+                "@alice:example.org": member(),
+            }
+        }
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "hello",
+                "serialize": lambda self: {"body": "hello"},
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": room_id, "content": content},
+        )()
+
+        cfg = {
+            "bot": {"respond_to_dms": True},
+            "whitelist": {"always": [], "mentions": [], "rand": []},
+        }
+        with patch("src.matrix_chatbot.get_config", return_value=cfg):
+            await bot._on_message(evt)
+
+        bot._constant_chat.assert_awaited_once_with(room_id, evt)
+
+    async def test_on_message_ignores_dm_when_disabled_and_unwhitelisted(self):
+        room_id = "!dm:example.org"
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+        bot._initial_sync_done = True
+        bot.recentMessages = {}
+        bot._constant_chat = AsyncMock()
+        bot.state_store = type("StateStore", (), {})()
+        member = type("Member", (), {"membership": Membership.JOIN})
+        bot.state_store.members = {
+            room_id: {
+                "@bot:example.org": member(),
+                "@alice:example.org": member(),
+            }
+        }
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "hello",
+                "serialize": lambda self: {"body": "hello"},
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": room_id, "content": content},
+        )()
+
+        cfg = {
+            "bot": {"respond_to_dms": False},
+            "whitelist": {"always": [], "mentions": [], "rand": []},
+        }
+        with patch("src.matrix_chatbot.get_config", return_value=cfg):
+            await bot._on_message(evt)
+
+        bot._constant_chat.assert_not_awaited()
+
+
+class MatrixInviteFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_room_member_invite_for_bot_uses_join_fallback(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._join_invited_room = AsyncMock()  # type: ignore
+
+        content = type("Content", (), {"membership": Membership.INVITE})()
+        evt = type(
+            "Event",
+            (),
+            {
+                "content": content,
+                "state_key": "@bot:example.org",
+                "room_id": "!dm:example.org",
+            },
+        )()
+
+        await bot._on_room_member(evt)
+        bot._join_invited_room.assert_awaited_once_with(
+            evt, source="room_member_invite"
+        )
+
+    async def test_room_member_non_invite_is_ignored(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._join_invited_room = AsyncMock()  # type: ignore
+
+        content = type("Content", (), {"membership": Membership.JOIN})()
+        evt = type(
+            "Event",
+            (),
+            {
+                "content": content,
+                "state_key": "@bot:example.org",
+                "room_id": "!room:example.org",
+            },
+        )()
+
+        await bot._on_room_member(evt)
+        bot._join_invited_room.assert_not_awaited()

@@ -230,6 +230,15 @@ def _is_whitelisted(room_id: str, wtype: str) -> bool:
     return is_whitelisted_id(room_id, whitelist_values)
 
 
+def _respond_to_dms_enabled(cfg: dict[str, Any]) -> bool:
+    """Read the global DM-response toggle from config."""
+    bot_cfg = cfg.get("bot", {})
+    if isinstance(bot_cfg, dict):
+        return bool(bot_cfg.get("respond_to_dms", False))
+    # Backward-compatible fallback if the key is set at top-level.
+    return bool(cfg.get("respond_to_dms", False))
+
+
 def _clean_response(resp: str) -> str:
     return dequote(html.unescape(resp).strip())
 
@@ -343,6 +352,8 @@ class MatrixBot:
         self.pendingSwipes: dict[str, list[tuple[str, str]]] = {}
         self.randomChats: dict[str, RandomChat] = {}
         self.recentMessages: dict[str, deque] = {}
+        self._direct_rooms: set[str] = set()
+        self._joining_rooms: set[str] = set()
 
         # Aliases used for mention detection
         localpart = self.bot_mxid.split(":")[0].lstrip("@")
@@ -421,6 +432,7 @@ class MatrixBot:
         # Event handlers
         self.client.add_event_handler(EventType.ROOM_MESSAGE, self._on_message)
         self.client.add_event_handler(EventType.REACTION, self._on_reaction)
+        self.client.add_event_handler(EventType.ROOM_MEMBER, self._on_room_member)
         self.client.add_event_handler(InternalEventType.INVITE, self._on_invite)
 
         # NOTE: we do NOT set ignore_initial_sync because it drops ALL
@@ -569,15 +581,54 @@ class MatrixBot:
     # ── event handlers ───────────────────────────────────────────────
 
     async def _on_invite(self, evt: Any) -> None:
-        """Auto-join rooms the bot is invited to."""
+        """Auto-join rooms when an invite internal event is received."""
+        await self._join_invited_room(evt, source="internal_invite")
+
+    async def _on_room_member(self, evt: Any) -> None:
+        """Fallback invite handler for m.room.member invite events."""
+        try:
+            membership = getattr(getattr(evt, "content", None), "membership", None)
+            state_key = str(getattr(evt, "state_key", "") or "")
+            room_id = getattr(evt, "room_id", None)
+            if not room_id:
+                return
+            if str(membership).upper().endswith("INVITE") and state_key == self.bot_mxid:
+                await self._join_invited_room(evt, source="room_member_invite")
+        except Exception as exc:
+            log.debug("Ignoring ROOM_MEMBER event for invite handling: %s", exc)
+
+    async def _join_invited_room(self, evt: Any, source: str) -> None:
         room_id = getattr(evt, "room_id", None)
         if not room_id:
             return
+        room_id = str(room_id)
+        joining_rooms = getattr(self, "_joining_rooms", set())
+        if room_id in joining_rooms:
+            return
+        joining_rooms.add(room_id)
+        self._joining_rooms = joining_rooms
+        log.info("[%s] Invite received via %s", room_id, source)
+        # Track rooms that are explicitly marked as direct-message invites.
+        try:
+            content = getattr(evt, "content", None)
+            is_direct = bool(getattr(content, "is_direct", False))
+            if not is_direct and hasattr(content, "serialize"):
+                serialized = content.serialize()
+                if isinstance(serialized, dict):
+                    is_direct = bool(serialized.get("is_direct", False))
+            if is_direct:
+                if not hasattr(self, "_direct_rooms"):
+                    self._direct_rooms = set()
+                self._direct_rooms.add(room_id)
+        except Exception:
+            pass
         try:
             await self.client.join_room(room_id)
             log.info("Joined room %s after invite", room_id)
         except Exception as exc:
             log.warning("Failed to join %s: %s", room_id, exc)
+        finally:
+            joining_rooms.discard(room_id)
 
     async def _on_message(self, evt: Any) -> None:
         """Handle incoming ``m.room.message`` events (including decrypted)."""
@@ -620,6 +671,12 @@ class MatrixBot:
             raw_content, self.bot_mxid, self._aliases
         )
 
+        config = get_config()
+        if _respond_to_dms_enabled(config):
+            if await self._is_direct_message_room_live(room_id):
+                log.debug("[%s] Routing DM to constant_chat", room_id)
+                return await self._constant_chat(room_id, evt)
+
         # Whitelist routing
         if _is_whitelisted(room_id, "always"):
             return await self._constant_chat(room_id, evt)
@@ -637,6 +694,77 @@ class MatrixBot:
 
         # If mentioned in a mentions channel that didn't match above,
         # or not whitelisted at all -- ignore.
+
+    def _is_direct_message_room(self, room_id: str) -> bool:
+        """Best-effort DM detection: room has exactly two joined members."""
+        direct_rooms = getattr(self, "_direct_rooms", set())
+        if room_id in direct_rooms:
+            return True
+
+        joined_users = self._joined_users_from_state_store(room_id)
+        if joined_users is None:
+            return False
+        return len(joined_users) == 2 and self.bot_mxid in joined_users
+
+    def _joined_users_from_state_store(self, room_id: str) -> list[str] | None:
+        members_by_room = getattr(self.state_store, "members", None)
+        if not isinstance(members_by_room, dict):
+            return None
+
+        room_members = members_by_room.get(RoomID(room_id))
+        if room_members is None:
+            room_members = members_by_room.get(room_id)
+        if not isinstance(room_members, dict):
+            return None
+
+        joined_users: list[str] = []
+        for user_id, member in room_members.items():
+            membership = getattr(member, "membership", None)
+            if isinstance(member, dict):
+                membership = member.get("membership", membership)
+
+            if membership == Membership.JOIN or str(membership).upper().endswith(
+                "JOIN"
+            ):
+                joined_users.append(str(user_id))
+
+        return joined_users
+
+    async def _joined_users_via_client_api(self, room_id: str) -> list[str] | None:
+        # Fallback for cases where state_store.members is incomplete.
+        try:
+            get_joined_members = getattr(self.client, "get_joined_members", None)
+            if callable(get_joined_members):
+                resp = await get_joined_members(RoomID(room_id))
+                # Common shapes:
+                # - {"joined": { "@u:hs": {...} }}
+                # - {"joined_members": { "@u:hs": {...} }}
+                # - object with .joined / .joined_members
+                if isinstance(resp, dict):
+                    for key in ("joined", "joined_members"):
+                        users = resp.get(key)
+                        if isinstance(users, dict):
+                            return [str(uid) for uid in users.keys()]
+                else:
+                    for key in ("joined", "joined_members"):
+                        users = getattr(resp, key, None)
+                        if isinstance(users, dict):
+                            return [str(uid) for uid in users.keys()]
+        except Exception:
+            pass
+        return None
+
+    async def _is_direct_message_room_live(self, room_id: str) -> bool:
+        direct_rooms = getattr(self, "_direct_rooms", set())
+        if room_id in direct_rooms:
+            return True
+
+        joined_users = self._joined_users_from_state_store(room_id)
+        if joined_users is None:
+            joined_users = await self._joined_users_via_client_api(room_id)
+        if joined_users is None:
+            return False
+        return len(joined_users) == 2 and self.bot_mxid in joined_users
 
     async def _on_reaction(self, evt: Any) -> None:
         """Handle ``m.reaction`` events for swipe controls."""

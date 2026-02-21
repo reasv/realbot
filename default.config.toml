@@ -1,3 +1,6 @@
+[bot]
+respond_to_dms = false
+
 [whitelist]
 always = []
 mentions = []
