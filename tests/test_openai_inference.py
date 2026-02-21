@@ -126,6 +126,56 @@ class RunInferenceOverrideFileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_create.await_count, 1)
         self.assertEqual(fake_create.await_args.kwargs["extra_body"], {})
 
+    async def test_run_inference_logs_full_response_when_log_file_is_set(self):
+        class FakeCompletion:
+            def __init__(self, content: str):
+                self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]
+
+            def model_dump(self, mode: str = "json"):
+                return {
+                    "id": "cmpl_test",
+                    "choices": [{"message": {"content": "hello"}}],
+                    "usage": {"total_tokens": 12},
+                }
+
+        cfg = {
+            "openai": {
+                "max_tokens": 32,
+                "model": "fake-model",
+                "api_url": "http://localhost:5000/v1",
+            }
+        }
+        fake_create = AsyncMock(return_value=FakeCompletion("hello"))
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = os.path.join(td, "openai-response.jsonl")
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                    "OPENAI_RESPONSE_LOG_FILE": log_path,
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}]
+                )
+
+            self.assertEqual(result, {"message": "hello"})
+            with open(log_path, "r", encoding="utf-8") as f:
+                rows = [line.strip() for line in f.readlines() if line.strip()]
+            self.assertEqual(len(rows), 1)
+            payload = json.loads(rows[0])
+            self.assertEqual(payload["model"], "fake-model")
+            self.assertEqual(payload["api_url"], "http://localhost:5000/v1")
+            self.assertEqual(payload["response"]["id"], "cmpl_test")
+
 
 class UsernamePrefixStrippingTests(unittest.TestCase):
     def test_strip_repeated_prefix_at_start(self):

@@ -3,6 +3,7 @@ import json
 import re
 from typing import Any, Dict, List, Iterable
 import uuid
+from datetime import datetime, timezone
 import openai
 import asyncio
 import os
@@ -282,6 +283,70 @@ def _load_override_params() -> dict[str, Any]:
         return {}
 
 
+def _response_to_jsonable(response: Any) -> Any:
+    if isinstance(response, (str, int, float, bool)) or response is None:
+        return response
+
+    if isinstance(response, list):
+        return [_response_to_jsonable(item) for item in response]
+
+    if isinstance(response, tuple):
+        return [_response_to_jsonable(item) for item in response]
+
+    if isinstance(response, dict):
+        return {str(k): _response_to_jsonable(v) for k, v in response.items()}
+
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _response_to_jsonable(model_dump(mode="json"))
+        except Exception:
+            pass
+
+    to_dict = getattr(response, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _response_to_jsonable(to_dict())
+        except Exception:
+            pass
+
+    data = getattr(response, "__dict__", None)
+    if isinstance(data, dict):
+        return _response_to_jsonable(data)
+
+    return repr(response)
+
+
+def _log_openai_response(
+    completion: Any,
+    *,
+    model: str,
+    openai_url: str,
+    timeout_seconds: int,
+) -> None:
+    log_file = os.getenv("OPENAI_RESPONSE_LOG_FILE", "").strip()
+    if not log_file:
+        return
+
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "api_url": openai_url,
+        "timeout_seconds": timeout_seconds,
+        "response": _response_to_jsonable(completion),
+    }
+
+    try:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as f:
+            json.dump(entry, f, ensure_ascii=False)
+            f.write("\n")
+    except Exception as e:
+        print(f"Failed to write OPENAI_RESPONSE_LOG_FILE {log_file}: {e}")
+
+
 async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30):
     load_dotenv()
     openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
@@ -312,6 +377,12 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
                 max_tokens=max_tokens,
                 extra_body=override_params,
             )
+        _log_openai_response(
+            completion,
+            model=openai_model,
+            openai_url=openai_url,
+            timeout_seconds=timeout_seconds,
+        )
         return {
             "message": completion.choices[0].message.content,
         }
