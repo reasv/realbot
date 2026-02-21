@@ -44,6 +44,37 @@ class ChatInferencePendingIdTests(unittest.IsolatedAsyncioTestCase):
                     run_inference_mock.await_args.kwargs.get("channel_id"),
                     "!room:example.org",
                 )
+                self.assertEqual(run_inference_mock.await_args.kwargs.get("is_dm"), False)
+
+    async def test_chat_inference_forwards_is_dm_flag_to_run_inference(self):
+        cfg = {
+            "openai": {
+                "ctx_message_limit": 10,
+                "ctx_image_limit": 2,
+                "stopping_strings": ["\n"],
+                "stopping_strings_limit": -1,
+            }
+        }
+        with tempfile.TemporaryDirectory() as td:
+            history_path = os.path.join(td, "room.json")
+            run_inference_mock = AsyncMock(return_value={"message": "assistant: hello there"})
+            with patch.dict(os.environ, {"BOT_NAME": "assistant"}, clear=False), patch(
+                "src.openai_inference._history_file_for_channel", return_value=history_path
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.run_inference",
+                new=run_inference_mock,
+            ):
+                await openai_inference.chat_inference(
+                    "!dm:example.org",
+                    [{"user": "alice", "message": "hi"}],
+                    is_dm=True,
+                )
+
+            self.assertEqual(
+                run_inference_mock.await_args.kwargs.get("channel_id"),
+                "!dm:example.org",
+            )
+            self.assertEqual(run_inference_mock.await_args.kwargs.get("is_dm"), True)
 
 
 class ChatInferenceEmptyReplyTests(unittest.IsolatedAsyncioTestCase):
@@ -323,6 +354,105 @@ class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_create.await_count, 1)
         messages = fake_create.await_args.kwargs["messages"]
         self.assertEqual(messages[0]["content"], "OVERRIDE: assistant")
+
+    async def test_run_inference_uses_dm_template_when_is_dm_without_channel_override(self):
+        fake_create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))]
+            )
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "example_system_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write("GLOBAL: {{assistant_username}}")
+            with open(os.path.join(td, "dm_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write("DM: {{assistant_username}}")
+
+            cfg = {
+                "openai": {
+                    "max_tokens": 32,
+                    "model": "fake-model",
+                    "api_url": "http://localhost:5000/v1",
+                    "system_prompt_template_dir": td,
+                    "system_prompt_template_name": "example_system_prompt.txt",
+                    "system_prompt_template_dm_name": "dm_prompt.txt",
+                }
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}],
+                    channel_id="!dm-room:example.org",
+                    is_dm=True,
+                )
+
+        self.assertEqual(result, {"message": "hello"})
+        messages = fake_create.await_args.kwargs["messages"]
+        self.assertEqual(messages[0]["content"], "DM: assistant")
+
+    async def test_run_inference_channel_override_beats_dm_override(self):
+        fake_create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))]
+            )
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "example_system_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write("GLOBAL: {{assistant_username}}")
+            with open(os.path.join(td, "dm_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write("DM: {{assistant_username}}")
+            with open(os.path.join(td, "channel_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write("CHANNEL: {{assistant_username}}")
+
+            cfg = {
+                "openai": {
+                    "max_tokens": 32,
+                    "model": "fake-model",
+                    "api_url": "http://localhost:5000/v1",
+                    "system_prompt_template_dir": td,
+                    "system_prompt_template_name": "example_system_prompt.txt",
+                    "system_prompt_template_dm_name": "dm_prompt.txt",
+                    "system_prompt_template_channel_overrides": {
+                        "!dm-room:example.org": "channel_prompt.txt",
+                    },
+                }
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}],
+                    channel_id="!dm-room:example.org",
+                    is_dm=True,
+                )
+
+        self.assertEqual(result, {"message": "hello"})
+        messages = fake_create.await_args.kwargs["messages"]
+        self.assertEqual(messages[0]["content"], "CHANNEL: assistant")
 
 
 class UsernamePrefixStrippingTests(unittest.TestCase):

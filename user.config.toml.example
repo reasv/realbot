@@ -25,7 +25,10 @@ ctx_len = 30
 # File templates use `{{assistant_username}}` placeholders.
 # system_prompt_template_dir = "prompts"
 # system_prompt_template_name = "example_system_prompt.txt"
+# Optional DM-wide prompt template filename in the template dir.
+# system_prompt_template_dm_name = "dm_prompt.txt"
 # Optional per-channel overrides (channel ID -> template filename in template dir).
+# Priority order: channel override > DM override > global template.
 # [openai.system_prompt_template_channel_overrides]
 # "!roomid:matrix.org" = "matrix_room_prompt.txt"
 # "#ai" = "irc_channel_prompt.txt"

@@ -292,9 +292,15 @@ class AioIrcBot(irc.client_aio.AioSimpleIRCClient):
             # Clear out the queue
             self.pendingMessages[channel] = []
             async def process_channel(channel: str, pending: List[dict[str, Any]]):
+                # IRC channel names usually start with '#'; other targets are private messages.
+                is_dm_channel = not str(channel).startswith("#")
                 try:
                     # Await your async inference call
-                    inference_result = await chat_inference(channel, pending)
+                    inference_result = await chat_inference(
+                        channel,
+                        pending,
+                        is_dm=is_dm_channel,
+                    )
                 except Exception as e:
                     print(f"[{channel}] chat_inference error: {e}")
                     inference_result = None

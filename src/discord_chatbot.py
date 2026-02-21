@@ -575,6 +575,8 @@ class Bot(discord.Client):
                 messages: List[dict[str, Any]],
                 swipe_jobs: list[tuple[int, str]],
             ):
+                # DMs/group DMs have no guild.
+                is_dm_channel = getattr(channel, "guild", None) is None
                 async with channel.typing():
                     if swipe_jobs:
                         swipes_cfg = get_config().get("swipes", {}) or {}
@@ -608,7 +610,11 @@ class Bot(discord.Client):
                                 new_text: str | None = None
                                 try:
                                     if action == "regen":
-                                        new_text = await swipe_regenerate(channelID, str(message_id))
+                                        new_text = await swipe_regenerate(
+                                            channelID,
+                                            str(message_id),
+                                            is_dm=is_dm_channel,
+                                        )
                                     elif action == "prev":
                                         new_text = swipe_prev(channelID, str(message_id))
                                     elif action == "next":
@@ -644,7 +650,11 @@ class Bot(discord.Client):
                         # Nothing more to do
                         return
                     try:
-                        inference_result = await chat_inference(channelID, messages)
+                        inference_result = await chat_inference(
+                            channelID,
+                            messages,
+                            is_dm=is_dm_channel,
+                        )
                     except Exception as e:
                         print(e)
                         inference_result = None

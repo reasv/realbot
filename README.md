@@ -133,9 +133,13 @@ Optional prompt/truncation controls under `[openai]`:
 
 - `system_prompt_template_dir` (optional directory containing prompt template files; default `prompts`)
 - `system_prompt_template_name` (optional template filename, e.g. `example_system_prompt.txt`; supports `{{assistant_username}}`)
+- `system_prompt_template_dm_name` (optional DM-wide template filename)
 - `system_prompt_template_channel_overrides` (optional channel ID -> template filename map)
 - `stopping_strings`
 - `stopping_strings_limit`
+
+Priority order when selecting prompt templates:
+`channel override > DM override > global template`
 
 Example:
 
@@ -143,6 +147,7 @@ Example:
 [openai]
 system_prompt_template_dir = "prompts"
 system_prompt_template_name = "example_system_prompt.txt"
+system_prompt_template_dm_name = "dm_prompt.txt"
 
 [openai.system_prompt_template_channel_overrides]
 "!roomid:matrix.org" = "matrix_room_prompt.txt"

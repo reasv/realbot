@@ -1313,6 +1313,7 @@ class MatrixBot:
         swipes_cfg = get_config().get("swipes", {}) or {}
         prev_emoji = str(swipes_cfg.get("prev_emoji", "\u25c0\ufe0f"))
         next_emoji = str(swipes_cfg.get("next_emoji", "\u25b6\ufe0f"))
+        is_dm_room = await self._is_direct_message_room_live(room_id)
 
         jobs = dedupe_swipe_jobs(swipe_jobs)
 
@@ -1320,7 +1321,7 @@ class MatrixBot:
             new_text: str | None = None
             try:
                 if action == "regen":
-                    new_text = await swipe_regenerate(room_id, msg_id)
+                    new_text = await swipe_regenerate(room_id, msg_id, is_dm=is_dm_room)
                 elif action == "prev":
                     new_text = swipe_prev(room_id, msg_id)
                 elif action == "next":
@@ -1358,8 +1359,9 @@ class MatrixBot:
     # ── inference handling ───────────────────────────────────────────
 
     async def _handle_inference(self, room_id: str, messages: list[dict]) -> None:
+        is_dm_room = await self._is_direct_message_room_live(room_id)
         try:
-            result = await chat_inference(room_id, messages)
+            result = await chat_inference(room_id, messages, is_dm=is_dm_room)
         except Exception as exc:
             log.error("[%s] Inference failed: %s", room_id, exc)
             return

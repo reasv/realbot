@@ -68,9 +68,19 @@ def _channel_template_override_name(openai_cfg: dict[str, Any], channel_id: int 
     return ""
 
 
+def _dm_template_name(openai_cfg: dict[str, Any], is_dm: bool) -> str:
+    if not is_dm:
+        return ""
+    value = openai_cfg.get("system_prompt_template_dm_name", "")
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
 def _load_system_prompt_template(
     config: dict[str, Any],
     channel_id: int | str | None = None,
+    is_dm: bool = False,
 ) -> tuple[str, bool]:
     """
     Returns `(template, uses_double_brace_syntax)`.
@@ -80,6 +90,8 @@ def _load_system_prompt_template(
         return SYSTEM_PROMPT_TEMPLATE, False
 
     template_name = _channel_template_override_name(openai_cfg, channel_id)
+    if not template_name:
+        template_name = _dm_template_name(openai_cfg, is_dm)
     if not template_name:
         template_name = str(openai_cfg.get("system_prompt_template_name", "") or "").strip()
     if not template_name:
@@ -422,6 +434,7 @@ async def run_inference(
     history: List[dict[str, Any]],
     timeout_seconds: int = 30,
     channel_id: int | str | None = None,
+    is_dm: bool = False,
 ):
     load_dotenv()
     openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
@@ -438,6 +451,7 @@ async def run_inference(
     system_prompt_template, use_double_brace_template = _load_system_prompt_template(
         config,
         channel_id=channel_id,
+        is_dm=is_dm,
     )
     if use_double_brace_template:
         system_prompt = _render_double_brace_template(
@@ -489,6 +503,7 @@ async def _generate_reply_from_stored_messages(
     username: str,
     timeout_seconds: int,
     channel_id: int | str | None = None,
+    is_dm: bool = False,
 ) -> str | None:
     config = get_config()
     try:
@@ -514,7 +529,12 @@ async def _generate_reply_from_stored_messages(
         if formatted:
             formatted_messages.append(formatted)
 
-    result = await run_inference(formatted_messages, timeout_seconds, channel_id=channel_id)
+    result = await run_inference(
+        formatted_messages,
+        timeout_seconds,
+        channel_id=channel_id,
+        is_dm=is_dm,
+    )
     if result is None:
         return None
 
@@ -530,7 +550,12 @@ async def _generate_reply_from_stored_messages(
     return reply
 
 
-async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], timeout_seconds: int = 60):
+async def chat_inference(
+    channelID: int | str,
+    messages: List[dict[str, Any]],
+    timeout_seconds: int = 60,
+    is_dm: bool = False,
+):
     load_dotenv()
     username = os.getenv("BOT_NAME")
     assert username is not None, "Error. Please set the BOT_NAME environment variable."
@@ -545,6 +570,7 @@ async def chat_inference(channelID: int | str, messages: List[dict[str, Any]], t
         username,
         timeout_seconds,
         channel_id=channelID,
+        is_dm=is_dm,
     )
     if reply is None:
         return None
@@ -678,7 +704,12 @@ def _ensure_swipe_fields(msg: dict[str, Any]) -> None:
     msg["swipeIndex"] = found
 
 
-async def swipe_regenerate(channelID: int | str, messageId: str, timeout_seconds: int = 60) -> str | None:
+async def swipe_regenerate(
+    channelID: int | str,
+    messageId: str,
+    timeout_seconds: int = 60,
+    is_dm: bool = False,
+) -> str | None:
     """
     Regenerate a prior assistant message (nondestructive).
     - Initializes swipes/swipeIndex if missing.
@@ -713,6 +744,7 @@ async def swipe_regenerate(channelID: int | str, messageId: str, timeout_seconds
         username,
         timeout_seconds,
         channel_id=channelID,
+        is_dm=is_dm,
     )
     if reply is None:
         return None
