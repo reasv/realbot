@@ -177,6 +177,95 @@ class RunInferenceOverrideFileTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["response"]["id"], "cmpl_test")
 
 
+class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_inference_uses_configured_system_prompt_template_file(self):
+        fake_create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))]
+            )
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            template_path = os.path.join(td, "system_prompt.txt")
+            with open(template_path, "w", encoding="utf-8") as f:
+                f.write("You are {{assistant_username}}. Reply with one sentence.")
+
+            cfg = {
+                "openai": {
+                    "max_tokens": 32,
+                    "model": "fake-model",
+                    "api_url": "http://localhost:5000/v1",
+                    "system_prompt_template_file": template_path,
+                }
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}]
+                )
+
+        self.assertEqual(result, {"message": "hello"})
+        self.assertEqual(fake_create.await_count, 1)
+        messages = fake_create.await_args.kwargs["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[0]["content"], "You are assistant. Reply with one sentence.")
+
+    async def test_run_inference_file_template_keeps_single_braces_literal(self):
+        fake_create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))]
+            )
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            template_path = os.path.join(td, "system_prompt.txt")
+            with open(template_path, "w", encoding="utf-8") as f:
+                f.write('JSON example: {"k":"v"}; user={{assistant_username}}')
+
+            cfg = {
+                "openai": {
+                    "max_tokens": 32,
+                    "model": "fake-model",
+                    "api_url": "http://localhost:5000/v1",
+                    "system_prompt_template_file": template_path,
+                }
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOT_NAME": "assistant",
+                    "LLM_API_KEY": "test-key",
+                },
+                clear=False,
+            ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+                "src.openai_inference.openai.AsyncOpenAI", return_value=fake_client
+            ):
+                result = await openai_inference.run_inference(
+                    [{"role": "user", "content": "hello"}]
+                )
+
+        self.assertEqual(result, {"message": "hello"})
+        self.assertEqual(fake_create.await_count, 1)
+        messages = fake_create.await_args.kwargs["messages"]
+        self.assertEqual(messages[0]["content"], 'JSON example: {"k":"v"}; user=assistant')
+
+
 class UsernamePrefixStrippingTests(unittest.TestCase):
     def test_strip_repeated_prefix_at_start(self):
         text = "assistant: assistant: hello there"

@@ -29,6 +29,38 @@ SYSTEM_PROMPT_TEMPLATE = (
 )
 
 
+_DOUBLE_BRACE_TEMPLATE_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+
+def _render_double_brace_template(template: str, values: dict[str, str]) -> str:
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return values.get(key, match.group(0))
+
+    return _DOUBLE_BRACE_TEMPLATE_PATTERN.sub(repl, template)
+
+
+def _load_system_prompt_template(config: dict[str, Any]) -> tuple[str, bool]:
+    """
+    Returns `(template, uses_double_brace_syntax)`.
+    """
+    openai_cfg = config.get("openai", {})
+    if not isinstance(openai_cfg, dict):
+        return SYSTEM_PROMPT_TEMPLATE, False
+
+    template_file = str(openai_cfg.get("system_prompt_template_file", "") or "").strip()
+    if not template_file:
+        return SYSTEM_PROMPT_TEMPLATE, False
+
+    resolved_path = os.path.expanduser(template_file)
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as f:
+            return f.read(), True
+    except Exception as e:
+        print(f"Failed to load system prompt template file {resolved_path}; using default template. {e}")
+        return SYSTEM_PROMPT_TEMPLATE, False
+
+
 def _as_string_list(value: Any) -> List[str]:
     if value is None:
         return []
@@ -360,12 +392,24 @@ async def run_inference(history: List[dict[str, Any]], timeout_seconds: int = 30
     )
     username = os.getenv("BOT_NAME")
     openai_model = config.get("openai", {}).get("model", "default")
+    system_prompt_template, use_double_brace_template = _load_system_prompt_template(config)
+    if use_double_brace_template:
+        system_prompt = _render_double_brace_template(
+            system_prompt_template,
+            {"assistant_username": str(username)},
+        )
+    else:
+        try:
+            system_prompt = system_prompt_template.format(assistant_username=username)
+        except Exception as e:
+            print(f"Failed to format system prompt template; using unformatted template. {e}")
+            system_prompt = system_prompt_template
     
     print(f"Using model: {openai_model}")
     message_history = [
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT_TEMPLATE.format(assistant_username=username),
+                "content": system_prompt,
             },
             *normalize_chat_history(history),
         ]

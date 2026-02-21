@@ -129,8 +129,9 @@ Supports regenerate/prev/next controls, whitelists, and optional auto-react cont
 
 ### OpenAI output truncation
 
-Optional truncation controls under `[openai]`:
+Optional prompt/truncation controls under `[openai]`:
 
+- `system_prompt_template_file` (optional path to a `.txt` template file; supports `{{assistant_username}}`)
 - `stopping_strings`
 - `stopping_strings_limit`
 
