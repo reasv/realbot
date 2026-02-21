@@ -93,7 +93,7 @@ def _strip_assistant_username_prefixes(text: str | None, username: str) -> str:
     if not text or not username:
         return text or ""
 
-    prefix_pattern = re.compile(rf"^{re.escape(username)}:\s*")
+    prefix_pattern = re.compile(rf"^\s*{re.escape(username)}:\s*")
 
     lines = text.splitlines(keepends=True)
     non_empty_lines = [i for i, line in enumerate(lines) if line.strip()]

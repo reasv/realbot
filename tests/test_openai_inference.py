@@ -192,3 +192,8 @@ class UsernamePrefixStrippingTests(unittest.TestCase):
         text = "assistant: line one\nbob: line two\nassistant: line three"
         stripped = openai_inference._strip_assistant_username_prefixes(text, "assistant")
         self.assertEqual(stripped, "line one\nbob: line two\nassistant: line three")
+
+    def test_strip_prefix_with_leading_whitespace(self):
+        text = " kuroneko:  lmao bro went from murderous rage"
+        stripped = openai_inference._strip_assistant_username_prefixes(text, "kuroneko")
+        self.assertEqual(stripped, "lmao bro went from murderous rage")
