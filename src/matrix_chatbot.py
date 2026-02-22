@@ -317,6 +317,33 @@ def _image_filenames_from_records(records: list[dict]) -> list[str]:
     return names
 
 
+def _format_link_preview_lines(link_previews: list[dict]) -> list[str]:
+    lines: list[str] = []
+    for lp in link_previews:
+        if not isinstance(lp, dict):
+            continue
+        src = lp.get("source", "")
+        url = lp.get("url", "")
+        if src == "twitter":
+            author = lp.get("author", "")
+            text = lp.get("text", "")
+            if author and text:
+                lines.append(f"{url} — {author}: {text}")
+            elif text:
+                lines.append(f"{url} — {text}")
+            continue
+
+        title = lp.get("title", "")
+        desc = lp.get("description", "")
+        if title and desc:
+            lines.append(f"{url} — {title}: {desc}")
+        elif title:
+            lines.append(f"{url} — {title}")
+        elif desc:
+            lines.append(f"{url} — {desc}")
+    return lines
+
+
 def _event_timestamp_ms(evt: Any) -> int | None:
     for attr in ("timestamp", "origin_server_ts", "server_timestamp"):
         value = getattr(evt, attr, None)
@@ -1082,26 +1109,7 @@ class MatrixBot:
 
         # Append link preview text so the LLM can see page/tweet content.
         if link_previews:
-            lines: list[str] = []
-            for lp in link_previews:
-                src = lp.get("source", "")
-                url = lp.get("url", "")
-                if src == "twitter":
-                    author = lp.get("author", "")
-                    text = lp.get("text", "")
-                    if author and text:
-                        lines.append(f"{url} — {author}: {text}")
-                    elif text:
-                        lines.append(f"{url} — {text}")
-                else:
-                    title = lp.get("title", "")
-                    desc = lp.get("description", "")
-                    if title and desc:
-                        lines.append(f"{url} — {title}: {desc}")
-                    elif title:
-                        lines.append(f"{url} — {title}")
-                    elif desc:
-                        lines.append(f"{url} — {desc}")
+            lines = _format_link_preview_lines(link_previews)
             if lines:
                 block = "\n".join(lines)
                 processed["message"] += f"\n\n[Link Previews]\n{block}"
@@ -1363,14 +1371,26 @@ class MatrixBot:
         reply_body = _event_text_body(replied_evt)
         reply_text = self._clean_content(reply_body).strip()
 
-        reply_images, reply_filenames = await self._extract_event_images(
-            replied_evt, room_id, source="matrix_reply"
-        )
-        if not reply_filenames and reply_images:
-            reply_filenames = _image_filenames_from_records(reply_images)
+        if not getattr(replied_evt, "room_id", None):
+            try:
+                setattr(replied_evt, "room_id", RoomID(room_id))
+            except Exception:
+                pass
+
+        raw_reply_images, reply_link_previews = await self._extract_images(replied_evt)
+        reply_images: list[dict] = []
+        for img in raw_reply_images:
+            if not isinstance(img, dict):
+                continue
+            tagged = dict(img)
+            tagged["reply_source"] = tagged.get("source", "")
+            tagged["source"] = "matrix_reply"
+            reply_images.append(tagged)
+        reply_filenames = _image_filenames_from_records(reply_images)
+        reply_preview_lines = _format_link_preview_lines(reply_link_previews)
 
         history_msg = None
-        if not reply_text or not reply_images:
+        if not reply_text or not reply_images or not reply_preview_lines:
             history_msg = self._history_message_by_id(room_id, target_event_id)
 
         if not reply_text and isinstance(history_msg, dict):
@@ -1385,7 +1405,12 @@ class MatrixBot:
                     dict(item) for item in history_images if isinstance(item, dict)
                 ]
                 if copied_images:
-                    reply_images = copied_images
+                    reply_images = []
+                    for img in copied_images:
+                        tagged = dict(img)
+                        tagged["reply_source"] = tagged.get("source", "")
+                        tagged["source"] = "matrix_reply"
+                        reply_images.append(tagged)
                     reply_filenames = _image_filenames_from_records(reply_images)
 
         if sender_name == "unknown" and isinstance(history_msg, dict):
@@ -1393,7 +1418,7 @@ class MatrixBot:
             if isinstance(history_user, str) and history_user.strip():
                 sender_name = history_user.strip()
 
-        if not reply_text and not reply_images:
+        if not reply_text and not reply_images and not reply_preview_lines:
             return None, []
 
         lines = [
@@ -1409,6 +1434,9 @@ class MatrixBot:
             )
         elif reply_images:
             lines.append("Replied Message Image(s): attached")
+        if reply_preview_lines:
+            lines.append("Replied Message Link Previews:")
+            lines.extend(reply_preview_lines)
 
         return "\n".join(lines), reply_images
 
@@ -1643,6 +1671,7 @@ class MatrixBot:
         images: list[dict] = []
         link_previews: list[dict] = []
         content = evt.content
+        content_dict = _event_content_dict(evt)
         room_id = str(evt.room_id)
 
         config = get_config()
@@ -1653,47 +1682,18 @@ class MatrixBot:
         # ── 1. m.image attachment ────────────────────────────────────────
         # In E2EE rooms, content.url is None; the media is at content.file
         # (an EncryptedFile with url, key, iv, hashes) and must be decrypted.
-        msgtype = getattr(content, "msgtype", None)
-        if msgtype == MessageType.IMAGE:
-            url = getattr(content, "url", None)
-            enc_file = getattr(content, "file", None)
-            filename = getattr(content, "body", "image.png") or "image.png"
-            media_url = url or (enc_file.url if enc_file else None)
-            if media_url:
-                try:
-                    data = await self.client.download_media(media_url)
-                    # Decrypt if this is an encrypted attachment
-                    if enc_file and not url:
-                        data = decrypt_attachment(
-                            data,
-                            enc_file.key.key,
-                            enc_file.hashes["sha256"],
-                            enc_file.iv,
-                        )
-                    local = await download_image_to_history(
-                        room_id, str(media_url), filename, data=data
-                    )
-                    images.append(
-                        {
-                            "source": "matrix_image",
-                            "url": str(media_url),
-                            "filename": filename,
-                            "local_path": local,
-                        }
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "[%s] Failed to download m.image %s: %s",
-                        room_id,
-                        media_url,
-                        exc,
-                    )
+        msgtype = content_dict.get("msgtype", getattr(content, "msgtype", None))
+        if msgtype == MessageType.IMAGE or str(msgtype) == "m.image":
+            event_images, _event_filenames = await self._extract_event_images(
+                evt, room_id, source="matrix_image"
+            )
+            images.extend(event_images)
 
         if len(images) >= max_images:
             return images[:max_images], link_previews
 
         # ── 2. URLs in text body ─────────────────────────────────────────
-        body = getattr(content, "body", None) or ""
+        body = content_dict.get("body", getattr(content, "body", None)) or ""
         image_url_re = re.compile(
             r"https?://\S+\.(?:png|jpg|jpeg|gif|webp)(?:\?\S*)?",
             re.IGNORECASE,

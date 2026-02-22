@@ -941,6 +941,79 @@ class MatrixReplyContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images[0]["source"], "matrix_reply")
         self.assertEqual(images[0]["filename"], "secret.png")
 
+    async def test_extract_reply_context_includes_link_previews_and_link_images(self):
+        bot = MatrixBot.__new__(MatrixBot)
+        bot.bot_mxid = "@bot:example.org"
+        bot._aliases = ["bot"]
+
+        async def fake_get_member(_self, _room_id, user_id):
+            if str(user_id) == "@bob:example.org":
+                return type("Member", (), {"displayname": "Bob"})()
+            return None
+
+        bot.state_store = type("StateStore", (), {"get_member": fake_get_member})()
+        bot.recentMessages = {"!room:example.org": deque([], maxlen=200)}
+
+        replied_evt = type(
+            "ReplyEvent",
+            (),
+            {
+                "event_id": "$parent",
+                "sender": "@bob:example.org",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "look https://example.org/image.png and https://example.org/page",
+                },
+            },
+        )()
+
+        preview_obj = type(
+            "Preview",
+            (),
+            {"title": "Example Page", "description": "Page description", "image": None},
+        )()
+
+        bot.client = type("Client", (), {})()
+        bot.client.get_event = AsyncMock(return_value=replied_evt)
+        bot.client.get_url_preview = AsyncMock(return_value=preview_obj)
+        bot.client.download_media = AsyncMock()
+
+        content = type(
+            "Content",
+            (),
+            {
+                "msgtype": MessageType.TEXT,
+                "body": "replying",
+                "serialize": lambda self: {
+                    "body": "replying",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                },
+            },
+        )()
+        evt = type(
+            "Event",
+            (),
+            {"sender": "@alice:example.org", "room_id": "!room:example.org", "content": content},
+        )()
+
+        with (
+            patch("src.matrix_chatbot.get_config", return_value={"matrix": {}}),
+            patch(
+                "src.matrix_chatbot.download_image_to_history",
+                new=AsyncMock(return_value="history/images/reply/image.png"),
+            ),
+        ):
+            section, images = await bot._extract_reply_context(evt)
+
+        self.assertIsNotNone(section)
+        assert section is not None
+        self.assertIn("Replied Message Image Filename(s): image.png", section)
+        self.assertIn("Replied Message Link Previews:", section)
+        self.assertIn("https://example.org/page — Example Page: Page description", section)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["source"], "matrix_reply")
+        self.assertEqual(images[0]["reply_source"], "matrix_url")
+
     async def test_process_message_preserves_quoted_reply_text(self):
         bot = MatrixBot.__new__(MatrixBot)
         bot.bot_mxid = "@bot:example.org"
