@@ -1,6 +1,7 @@
 __pycache__
 history/*.json
 history/*/*.json
+history/old
 history/matrix_store/*
 history/matrix_session.txt
 history/images
