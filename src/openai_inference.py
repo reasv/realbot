@@ -630,6 +630,7 @@ async def _run_gemini_request(
     *,
     model: str,
     api_url: str,
+    openai_cfg: dict[str, Any],
     message_history: List[dict[str, Any]],
     max_tokens: int,
     override_params: dict[str, Any],
@@ -644,11 +645,15 @@ async def _run_gemini_request(
     if api_key:
         client_kwargs["api_key"] = api_key
 
+    use_vertexai = bool(openai_cfg.get("gemini_vertexai", False))
+    if use_vertexai:
+        client_kwargs["vertexai"] = True
+
     if api_url:
         http_options: dict[str, Any] = {"base_url": api_url}
-        if api_key:
+        # Keep custom bearer header only for explicit Vertex mode/proxies that expect it.
+        if use_vertexai and api_key:
             http_options["headers"] = {"Authorization": f"Bearer {api_key}"}
-        client_kwargs["vertexai"] = True
         client_kwargs["http_options"] = http_options
 
     client = genai.Client(**client_kwargs)
@@ -732,6 +737,7 @@ async def run_inference(
             completion, request_payload, message = await _run_gemini_request(
                 model=model,
                 api_url=api_url,
+                openai_cfg=openai_cfg,
                 message_history=message_history,
                 max_tokens=max_tokens,
                 override_params=override_params,

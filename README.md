@@ -134,6 +134,7 @@ Optional prompt/truncation controls under `[openai]`:
 - `api_type` (`openai` by default; set to `gemini` to use the Google Gen AI SDK)
 - `model`
 - `api_url` (optional; provider endpoint/base URL override)
+- `gemini_vertexai` (optional; `false` by default. Set `true` only for Vertex-style Gemini endpoints)
 - `system_prompt_template_dir` (optional directory containing prompt template files; default `prompts`)
 - `system_prompt_template_name` (optional template filename, e.g. `example_system_prompt.txt`; supports `{{assistant_username}}`)
 - `system_prompt_template_dm_name` (optional DM-wide template filename)

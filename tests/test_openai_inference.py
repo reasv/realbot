@@ -287,15 +287,12 @@ class RunInferenceGeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_kwargs["contents"][0]["role"], "user")
         self.assertIn("<Chat History>", request_kwargs["contents"][0]["parts"][0]["text"])
 
-        self.assertTrue(captured_client_kwargs["vertexai"])
+        self.assertNotIn("vertexai", captured_client_kwargs)
         self.assertEqual(
             captured_client_kwargs["http_options"]["base_url"],
             "https://example-proxy.test/google-ai",
         )
-        self.assertEqual(
-            captured_client_kwargs["http_options"]["headers"]["Authorization"],
-            "Bearer test-key",
-        )
+        self.assertNotIn("headers", captured_client_kwargs["http_options"])
         self.assertEqual(fake_aio_client.aclose.await_count, 1)
 
 

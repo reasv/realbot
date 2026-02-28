@@ -25,6 +25,8 @@ ctx_len = 30
 # api_type = "openai"
 # model = "gemini-2.5-flash"
 # api_url = "https://generativelanguage.googleapis.com"
+# Optional: set true only when targeting Vertex-style Gemini endpoints.
+# gemini_vertexai = false
 # Optional prompt template settings to replace the built-in system prompt template.
 # File templates use `{{assistant_username}}` placeholders.
 # system_prompt_template_dir = "prompts"

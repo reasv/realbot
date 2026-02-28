@@ -19,6 +19,8 @@ ctx_len = 30
 [openai]
 # Supported values: "openai" or "gemini".
 api_type = "openai"
+# Optional: set true only when targeting Vertex-style Gemini endpoints.
+# gemini_vertexai = false
 max_tokens = 150
 ctx_message_limit = 4
 ctx_image_limit = 2
