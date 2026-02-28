@@ -655,7 +655,7 @@ async def _run_gemini_request(
         if use_vertexai and api_key:
             http_options["headers"] = {"Authorization": f"Bearer {api_key}"}
         client_kwargs["http_options"] = http_options
-
+    
     client = genai.Client(**client_kwargs)
     aclient = client.aio
 
@@ -665,9 +665,28 @@ async def _run_gemini_request(
         if converted is not None:
             gemini_contents.append(converted)
 
+    from google.genai import types
     config = google_genai_types.GenerateContentConfig(
         system_instruction=message_history[0]["content"] if message_history else "",
         max_output_tokens=max_tokens,
+        safety_settings=[
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        )
+      ]
     )
 
     request_payload: dict[str, Any] = {
