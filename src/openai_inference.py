@@ -1,5 +1,8 @@
 import copy
 import json
+import base64
+import binascii
+import mimetypes
 import re
 from typing import Any, Dict, List, Iterable
 import uuid
@@ -11,6 +14,13 @@ from dotenv import load_dotenv
 
 from .chat_image_utils import load_image_as_data_url
 from .utils import get_config, normalize_chat_history
+
+try:
+    from google import genai
+    from google.genai import types as google_genai_types
+except Exception:
+    genai = None
+    google_genai_types = None
 SYSTEM_PROMPT_TEMPLATE = (
     "You are {assistant_username}, a participant in a multi-user online chatroom.\n"
     "Write the next message in the chat as if you are {assistant_username}.\n"
@@ -30,6 +40,17 @@ SYSTEM_PROMPT_TEMPLATE = (
 
 
 _DOUBLE_BRACE_TEMPLATE_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+_DATA_URL_IMAGE_PATTERN = re.compile(r"^data:(?P<mime>[-\w.+/]+)?;base64,(?P<data>.+)$", re.DOTALL)
+
+
+def _normalize_api_type(openai_cfg: dict[str, Any]) -> str:
+    raw = str(openai_cfg.get("api_type", "openai") or "openai").strip().lower()
+    if raw in {"", "openai"}:
+        return "openai"
+    if raw in {"gemini", "google", "google_ai", "google-genai"}:
+        return "gemini"
+    print(f"Unsupported openai.api_type='{raw}', falling back to 'openai'.")
+    return "openai"
 
 
 def _render_double_brace_template(template: str, values: dict[str, str]) -> str:
@@ -401,11 +422,12 @@ def _response_to_jsonable(response: Any) -> Any:
     return repr(response)
 
 
-def _log_openai_response(
+def _log_inference_response(
     completion: Any,
     *,
+    api_type: str,
     model: str,
-    openai_url: str,
+    api_url: str,
     timeout_seconds: int,
     request_payload: dict[str, Any],
     system_prompt_template_filename: str | None,
@@ -416,8 +438,9 @@ def _log_openai_response(
 
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
+        "api_type": api_type,
         "model": model,
-        "api_url": openai_url,
+        "api_url": api_url,
         "timeout_seconds": timeout_seconds,
         "request": _response_to_jsonable(request_payload),
         "system_prompt_template_filename": system_prompt_template_filename,
@@ -435,24 +458,13 @@ def _log_openai_response(
         print(f"Failed to write OPENAI_RESPONSE_LOG_FILE {log_file}: {e}")
 
 
-async def run_inference(
-    history: List[dict[str, Any]],
-    timeout_seconds: int = 30,
-    channel_id: int | str | None = None,
-    is_dm: bool = False,
-):
-    load_dotenv()
-    openai_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1")
-    config = get_config()
-    max_tokens = config.get("openai", {}).get("max_tokens", 150)
-    openai_url = config.get("openai", {}).get("api_url", openai_url)
-    client = openai.AsyncOpenAI(
-        base_url=openai_url,
-        api_key=os.getenv("LLM_API_KEY"),
-        timeout=timeout_seconds
-    )
-    username = os.getenv("BOT_NAME")
-    openai_model = config.get("openai", {}).get("model", "default")
+def _build_system_prompt(
+    config: dict[str, Any],
+    username: str | None,
+    *,
+    channel_id: int | str | None,
+    is_dm: bool,
+) -> tuple[str, str | None]:
     system_prompt_template, use_double_brace_template, system_prompt_template_filename = _load_system_prompt_template(
         config,
         channel_id=channel_id,
@@ -463,42 +475,287 @@ async def run_inference(
             system_prompt_template,
             {"assistant_username": str(username)},
         )
-    else:
-        try:
-            system_prompt = system_prompt_template.format(assistant_username=username)
-        except Exception as e:
-            print(f"Failed to format system prompt template; using unformatted template. {e}")
-            system_prompt = system_prompt_template
-    
-    print(f"Using model: {openai_model}")
-    message_history = [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            *normalize_chat_history(history),
-        ]
-    override_params = _load_override_params()
+        return system_prompt, system_prompt_template_filename
+
+    try:
+        system_prompt = system_prompt_template.format(assistant_username=username)
+    except Exception as e:
+        print(f"Failed to format system prompt template; using unformatted template. {e}")
+        system_prompt = system_prompt_template
+    return system_prompt, system_prompt_template_filename
+
+
+def _build_message_history(system_prompt: str, history: List[dict[str, Any]]) -> List[dict[str, Any]]:
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        *normalize_chat_history(history),
+    ]
+
+
+def _decode_data_url_image(data_url: str) -> tuple[bytes, str] | None:
+    match = _DATA_URL_IMAGE_PATTERN.match(data_url)
+    if not match:
+        return None
+
+    raw_b64 = match.group("data")
+    mime_type = (match.group("mime") or "application/octet-stream").strip()
+    try:
+        image_bytes = base64.b64decode(raw_b64, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    return image_bytes, mime_type
+
+
+def _guess_image_mime_type(image_url: str) -> str | None:
+    guessed, _ = mimetypes.guess_type(image_url)
+    if guessed and guessed.startswith("image/"):
+        return guessed
+    return None
+
+
+def _gemini_image_part_from_segment(segment: dict[str, Any], types_module: Any) -> Any:
+    image_url_obj = segment.get("image_url")
+    if not isinstance(image_url_obj, dict):
+        return None
+
+    image_url = image_url_obj.get("url")
+    if not isinstance(image_url, str) or not image_url:
+        return None
+
+    decoded = _decode_data_url_image(image_url)
+    if decoded is not None:
+        image_bytes, mime_type = decoded
+        return types_module.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+
+    if image_url.startswith("gs://"):
+        mime_type = _guess_image_mime_type(image_url) or "image/jpeg"
+        return types_module.Part.from_uri(file_uri=image_url, mime_type=mime_type)
+
+    # Generic HTTP(S) URLs are represented as text so the prompt still carries context.
+    return types_module.Part.from_text(text=f"[image_url] {image_url}")
+
+
+def _gemini_parts_from_openai_content(content: Any, types_module: Any) -> list[Any]:
+    parts: list[Any] = []
+    if isinstance(content, str):
+        text = content.strip()
+        if text:
+            parts.append(types_module.Part.from_text(text=text))
+        return parts
+
+    if not isinstance(content, list):
+        return parts
+
+    for segment in content:
+        if not isinstance(segment, dict):
+            continue
+        part_type = segment.get("type")
+        if part_type == "text":
+            text = segment.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(types_module.Part.from_text(text=text))
+        elif part_type == "image_url":
+            image_part = _gemini_image_part_from_segment(segment, types_module)
+            if image_part is not None:
+                parts.append(image_part)
+    return parts
+
+
+def _openai_message_to_gemini_content(message: dict[str, Any], types_module: Any) -> Any:
+    role = str(message.get("role", "") or "").strip().lower()
+    if role == "system":
+        return None
+
+    gemini_role = "model" if role == "assistant" else "user"
+    parts = _gemini_parts_from_openai_content(message.get("content"), types_module)
+    if not parts:
+        return None
+    return types_module.Content(role=gemini_role, parts=parts)
+
+
+def _extract_gemini_text(completion: Any) -> str:
+    text = getattr(completion, "text", None)
+    if isinstance(text, str):
+        return text
+
+    candidates = getattr(completion, "candidates", None)
+    if isinstance(candidates, list):
+        texts: list[str] = []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) if content is not None else None
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                part_text = getattr(part, "text", None)
+                if isinstance(part_text, str) and part_text:
+                    texts.append(part_text)
+        if texts:
+            return "".join(texts)
+
+    return ""
+
+
+async def _run_openai_request(
+    *,
+    model: str,
+    api_url: str,
+    timeout_seconds: int,
+    message_history: List[dict[str, Any]],
+    max_tokens: int,
+    override_params: dict[str, Any],
+) -> tuple[Any, dict[str, Any], str]:
+    client = openai.AsyncOpenAI(
+        base_url=api_url,
+        api_key=os.getenv("LLM_API_KEY"),
+        timeout=timeout_seconds,
+    )
     request_payload = {
-        "model": openai_model,
+        "model": model,
         "messages": message_history,
         "max_tokens": max_tokens,
         "extra_body": override_params,
     }
+    completion = await client.chat.completions.create(
+        **request_payload,  # type: ignore[arg-type]
+    )
+    message = completion.choices[0].message.content
+    return completion, request_payload, message
+
+
+async def _run_gemini_request(
+    *,
+    model: str,
+    api_url: str,
+    message_history: List[dict[str, Any]],
+    max_tokens: int,
+    override_params: dict[str, Any],
+) -> tuple[Any, dict[str, Any], str]:
+    if genai is None or google_genai_types is None:
+        raise RuntimeError(
+            "Gemini inference requires the 'google-genai' package. Install dependencies and retry."
+        )
+
+    client_kwargs: dict[str, Any] = {}
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    if api_key:
+        client_kwargs["api_key"] = api_key
+
+    if api_url:
+        http_options: dict[str, Any] = {"base_url": api_url}
+        if api_key:
+            http_options["headers"] = {"Authorization": f"Bearer {api_key}"}
+        client_kwargs["vertexai"] = True
+        client_kwargs["http_options"] = http_options
+
+    client = genai.Client(**client_kwargs)
+    aclient = client.aio
+
+    gemini_contents: list[Any] = []
+    for message in message_history:
+        converted = _openai_message_to_gemini_content(message, google_genai_types)
+        if converted is not None:
+            gemini_contents.append(converted)
+
+    config = google_genai_types.GenerateContentConfig(
+        system_instruction=message_history[0]["content"] if message_history else "",
+        max_output_tokens=max_tokens,
+    )
+
+    request_payload: dict[str, Any] = {
+        "model": model,
+        "contents": gemini_contents,
+        "config": config,
+    }
+    if override_params:
+        request_payload["ignored_override_params"] = override_params
+
     try:
-        completion = await client.chat.completions.create(
-                **request_payload,  # type: ignore[arg-type]
+        completion = await aclient.models.generate_content(
+            model=model,
+            contents=gemini_contents,
+            config=config,
+        )
+    finally:
+        close = getattr(aclient, "aclose", None)
+        if callable(close):
+            maybe_awaitable = close()
+            if asyncio.iscoroutine(maybe_awaitable):
+                await maybe_awaitable
+
+    message = _extract_gemini_text(completion)
+    if override_params:
+        print("Sampling override params are ignored for api_type='gemini'.")
+    return completion, request_payload, message
+
+
+async def run_inference(
+    history: List[dict[str, Any]],
+    timeout_seconds: int = 30,
+    channel_id: int | str | None = None,
+    is_dm: bool = False,
+):
+    load_dotenv()
+    config = get_config()
+    openai_cfg = config.get("openai", {})
+    if not isinstance(openai_cfg, dict):
+        openai_cfg = {}
+
+    api_type = _normalize_api_type(openai_cfg)
+    default_api_url = os.getenv("OPENAI_API_URL", "http://localhost:5000/v1") if api_type == "openai" else ""
+    api_url = str(openai_cfg.get("api_url", default_api_url) or default_api_url)
+
+    try:
+        max_tokens = int(openai_cfg.get("max_tokens", 150))
+    except Exception:
+        max_tokens = 150
+
+    username = os.getenv("BOT_NAME")
+    model = str(openai_cfg.get("model", "default") or "default")
+
+    system_prompt, system_prompt_template_filename = _build_system_prompt(
+        config,
+        username,
+        channel_id=channel_id,
+        is_dm=is_dm,
+    )
+
+    print(f"Using {api_type} model: {model}")
+    message_history = _build_message_history(system_prompt, history)
+    override_params = _load_override_params()
+
+    try:
+        if api_type == "gemini":
+            completion, request_payload, message = await _run_gemini_request(
+                model=model,
+                api_url=api_url,
+                message_history=message_history,
+                max_tokens=max_tokens,
+                override_params=override_params,
             )
-        _log_openai_response(
+        else:
+            completion, request_payload, message = await _run_openai_request(
+                model=model,
+                api_url=api_url,
+                timeout_seconds=timeout_seconds,
+                message_history=message_history,
+                max_tokens=max_tokens,
+                override_params=override_params,
+            )
+        _log_inference_response(
             completion,
-            model=openai_model,
-            openai_url=openai_url,
+            api_type=api_type,
+            model=model,
+            api_url=api_url,
             timeout_seconds=timeout_seconds,
             request_payload=request_payload,
             system_prompt_template_filename=system_prompt_template_filename,
         )
         return {
-            "message": completion.choices[0].message.content,
+            "message": message,
         }
     except asyncio.TimeoutError:
         print(f"Inference timed out after {timeout_seconds} seconds")

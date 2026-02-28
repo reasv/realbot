@@ -17,6 +17,8 @@ respond_to_mentions = true
 ctx_len = 30
 
 [openai]
+# Supported values: "openai" or "gemini".
+api_type = "openai"
 max_tokens = 150
 ctx_message_limit = 4
 ctx_image_limit = 2

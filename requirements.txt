@@ -3,6 +3,7 @@ python-dotenv==1.0.0
 requests
 deepmerge==1.1.0
 openai
+google-genai
 git+https://github.com/mautrix/python.git
 base58
 python-olm

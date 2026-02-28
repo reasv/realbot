@@ -127,10 +127,13 @@ Configured under `[swipes]`.
 Supports regenerate/prev/next controls, whitelists, and optional auto-react controls.
 `user_whitelist`, `channel_whitelist`, and `auto_react_channel_whitelist` accept both integers and strings.
 
-### OpenAI output truncation
+### Inference provider and truncation
 
 Optional prompt/truncation controls under `[openai]`:
 
+- `api_type` (`openai` by default; set to `gemini` to use the Google Gen AI SDK)
+- `model`
+- `api_url` (optional; provider endpoint/base URL override)
 - `system_prompt_template_dir` (optional directory containing prompt template files; default `prompts`)
 - `system_prompt_template_name` (optional template filename, e.g. `example_system_prompt.txt`; supports `{{assistant_username}}`)
 - `system_prompt_template_dm_name` (optional DM-wide template filename)
@@ -145,6 +148,9 @@ Example:
 
 ```toml
 [openai]
+api_type = "openai"
+model = "gpt-4o-mini"
+api_url = "http://localhost:5000/v1"
 system_prompt_template_dir = "prompts"
 system_prompt_template_name = "example_system_prompt.txt"
 system_prompt_template_dm_name = "dm_prompt.txt"

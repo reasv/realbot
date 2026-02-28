@@ -217,6 +217,88 @@ class RunInferenceOverrideFileTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["response"]["id"], "cmpl_test")
 
 
+class RunInferenceGeminiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_inference_uses_gemini_when_api_type_is_set(self):
+        cfg = {
+            "openai": {
+                "api_type": "gemini",
+                "max_tokens": 32,
+                "model": "gemini-test-model",
+                "api_url": "https://example-proxy.test/google-ai",
+            }
+        }
+
+        captured_client_kwargs = {}
+        fake_generate = AsyncMock(return_value=SimpleNamespace(text="hello from gemini"))
+        fake_aio_client = SimpleNamespace(
+            models=SimpleNamespace(generate_content=fake_generate),
+            aclose=AsyncMock(),
+        )
+        fake_client = SimpleNamespace(aio=fake_aio_client)
+
+        def fake_client_factory(**kwargs):
+            captured_client_kwargs.update(kwargs)
+            return fake_client
+
+        class FakeGeminiTypes:
+            class Part:
+                @staticmethod
+                def from_text(*, text: str):
+                    return {"text": text}
+
+                @staticmethod
+                def from_bytes(*, data: bytes, mime_type: str):
+                    return {"inline_data": {"size": len(data), "mime_type": mime_type}}
+
+                @staticmethod
+                def from_uri(*, file_uri: str, mime_type: str):
+                    return {"file_data": {"uri": file_uri, "mime_type": mime_type}}
+
+            @staticmethod
+            def Content(*, role: str, parts):
+                return {"role": role, "parts": parts}
+
+            @staticmethod
+            def GenerateContentConfig(**kwargs):
+                return kwargs
+
+        fake_genai = SimpleNamespace(Client=fake_client_factory)
+
+        with patch.dict(
+            os.environ,
+            {
+                "BOT_NAME": "assistant",
+                "LLM_API_KEY": "test-key",
+            },
+            clear=False,
+        ), patch("src.openai_inference.get_config", return_value=cfg), patch(
+            "src.openai_inference.genai", fake_genai
+        ), patch("src.openai_inference.google_genai_types", FakeGeminiTypes):
+            result = await openai_inference.run_inference(
+                [{"role": "user", "content": "hello"}]
+            )
+
+        self.assertEqual(result, {"message": "hello from gemini"})
+        self.assertEqual(fake_generate.await_count, 1)
+
+        request_kwargs = fake_generate.await_args.kwargs
+        self.assertEqual(request_kwargs["model"], "gemini-test-model")
+        self.assertEqual(request_kwargs["config"]["max_output_tokens"], 32)
+        self.assertEqual(request_kwargs["contents"][0]["role"], "user")
+        self.assertIn("<Chat History>", request_kwargs["contents"][0]["parts"][0]["text"])
+
+        self.assertTrue(captured_client_kwargs["vertexai"])
+        self.assertEqual(
+            captured_client_kwargs["http_options"]["base_url"],
+            "https://example-proxy.test/google-ai",
+        )
+        self.assertEqual(
+            captured_client_kwargs["http_options"]["headers"]["Authorization"],
+            "Bearer test-key",
+        )
+        self.assertEqual(fake_aio_client.aclose.await_count, 1)
+
+
 class RunInferenceSystemPromptTemplateTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_inference_uses_configured_system_prompt_template_file(self):
         fake_create = AsyncMock(
